@@ -34,7 +34,7 @@ initial_condition_data = {
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[
-                        logging.FileHandler("C:\\work\\program_annealing\\cantilever_lighten\\pyprogram\\cae_opti_info.log"),
+                        logging.FileHandler("C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_info.log"),
                         logging.StreamHandler()
                     ])
 
@@ -107,14 +107,23 @@ def main2(file_path, phase):
     workbook = openpyxl.load_workbook(sys.argv[2])
     sheet = workbook["Sheet1"]
 
-    sheet.cell(row=5, column=1, value=f"{str(initial_condition_data["initial_density"])}")
-    sheet.cell(row=5, column=2, value=f"{str(initial_condition_data["density_increment"])}")
-    sheet.cell(row=5, column=3, value=f"{str(initial_condition_data["density_power"])}")
-    sheet.cell(row=5, column=4, value=f"{str(initial_condition_data["initial_youngs_modulus"])}")
-    sheet.cell(row=5, column=5, value=f"{str(initial_condition_data["initial_volume"])}")
-    sheet.cell(row=5, column=6, value=f"{str(initial_condition_data["cost_lambda"])}")
-    sheet.cell(row=5, column=7, value=f"{str(initial_condition_data["cost_lambda_n"])}")
-    sheet.cell(row=5, column=8, value=f"{str(initial_condition_data["loop_num"])}")
+    initial_density = initial_condition_data["initial_density"]
+    density_increment = initial_condition_data["density_increment"]
+    density_power = initial_condition_data["density_power"]
+    initial_youngs_modulus = initial_condition_data["initial_youngs_modulus"]
+    initial_volume = initial_condition_data["initial_volume"]
+    cost_lambda = initial_condition_data["cost_lambda"]
+    cost_lambda_n = initial_condition_data["cost_lambda_n"]
+    loop_num = initial_condition_data["loop_num"]
+
+    sheet.cell(row=5, column=1, value=f"{str(initial_density)}")
+    sheet.cell(row=5, column=2, value=f"{str(density_increment)}")
+    sheet.cell(row=5, column=3, value=f"{str(density_power)}")
+    sheet.cell(row=5, column=4, value=f"{str(initial_youngs_modulus)}")
+    sheet.cell(row=5, column=5, value=f"{str(initial_volume)}")
+    sheet.cell(row=5, column=6, value=f"{str(cost_lambda)}")
+    sheet.cell(row=5, column=7, value=f"{str(cost_lambda_n)}")
+    sheet.cell(row=5, column=8, value=f"{str(loop_num)}")
 
     phase_num = sheet.cell(row=10, column=1).value
     row_start = 13
@@ -267,7 +276,8 @@ def main2(file_path, phase):
             
     start_time_2 = time.time()
     
-    nid = len(internal_elem_dict)
+    ising_index_eid_map = {}
+    nInternalid = len(internal_elem_dict)
     h = defaultdict(int)
     J = defaultdict(int)
     for index, (key, elem) in enumerate(internal_elem_dict.items()):
@@ -278,11 +288,8 @@ def main2(file_path, phase):
         poissonratio = float(elem.get('poissonratio', 0))
         volume = float(elem.get('volume', 0))
 
-        initial_youngsmodulus = initial_condition_data["initial_youngs_modulus"]
-        initial_volume = initial_condition_data["initial_volume"]
-        initial_density = initial_condition_data["initial_density"]
-        density_increment = initial_condition_data["density_increment"]
-        density_power = initial_condition_data["density_power"]
+        ising_index_eid_map[eid] = index
+
         density_now = 0
         if phase_num == 1:
             density_now = initial_density
@@ -300,34 +307,34 @@ def main2(file_path, phase):
         alpha_value = pow(density_plus_delta, (1 - density_power))
         beta_value = pow(density_minus_delta, (1 - density_power))
         k_0 = (alpha_value - beta_value) / 2.0
-        kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngsmodulus
+        kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
         l_0 = density_now * sum_volume - initial_density * initial_volume
 
         scale_lambda = 1.0
-        cost_lambda = initial_condition_data["cost_lambda"] * pow(density_now, (1 - density_power)) * kappa_i / scale_lambda
+        cost_lambda_calc = cost_lambda * pow(density_now, (1 - density_power)) * kappa_i / scale_lambda
         h_first = k_0 * kappa_i
         h[index] = h_first
 
-        for j_index in range(index + 1, nid):
-            list_key = list(internal_elem_dict.keys())
-            volume_j = internal_elem_dict[list_key].get('volume', 0)
-            J[(index,j_index)] = 2.0 * cost_lambda
+        for j_index in range(index + 1, nInternalid):
+            # list_key = list(internal_elem_dict.keys())
+            # volume_j = internal_elem_dict[list_key[j_index]].get('volume', 0)
+            J[(index,j_index)] = 2.0 * cost_lambda_calc
 
     sampler = LeapHybridSampler()
     response = sampler.sample_ising(h, J)
 
-    ising_index_list = [None] * nid
+    ising_index_dict = {}
     for sample, E in response.data(fields=['sample','energy']):
         S_minus_1 = [k for k,v in sample.items() if v == -1]
         S_plus_1 = [k for k,v in sample.items() if v == 1]
 
         for elem in S_minus_1:
-            ising_index_list[elem] = -1
+            ising_index_dict[elem] = -1
 
         for elem in S_plus_1:
-            ising_index_list[elem] = 1
+            ising_index_dict[elem] = 1
 
-        print(f"イジングモデルの各要素の最適化後の値は: {ising_index_list} となる")
+        print(f"イジングモデルの各要素の最適化後の値は: {ising_index_dict} となる")
 
 
     start_time_3 = time.time()
@@ -347,24 +354,24 @@ def main2(file_path, phase):
     for index, value in enumerate(merged_elem_list):
         eid = index + 1
         sheet.cell(row=row_start + index + 1, column=col_start, value=eid)
-        dens_value_old = 0
-        if str(eid) in internal_elem_dict:
-            dens_value_old = 1.0
-        elif phase_num == 1:
-            dens_value_old = initial_density
-        else:
-            dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
-        
-        dens_value = dens_value_old + density_increment * value
-        if dens_value >= 1.0:
+        dens_value = 0
+        if str(eid) not in internal_elem_dict:
             dens_value = 1.0
-        if dens_value <= 0.0:
-            dens_value = 0.001
+        else:
+            dens_value_old = initial_density
+            if not phase_num == 1:
+                dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
+            ising_index = ising_index_eid_map[eid]
+            ising_value = ising_index_dict[ising_index]
+            dens_value = dens_value_old + density_increment * ising_value
+            if dens_value >= 1.0:
+                dens_value = 1.0
+            if dens_value <= 0.0:
+                dens_value = 0.001
 
         sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
 
-        density_power = initial_condition_data["density_power"]
-        mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngsmodulus
+        mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngs_modulus
 
         center_x = next((elem['center_x'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
         center_y = next((elem['center_y'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
@@ -495,7 +502,7 @@ def main2(file_path, phase):
     return True
 
 if __name__ == '__main__':
-    sys.argv = ["cae_optimize.py", "C:\\work\\program_annealing\\cantilever_lighten\\pyprogram\\cantilever_test_1.liml", "C:\\work\\program_annealing\\cantilever_lighten\\pyprogram\\result_summary.xlsx"]
+    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\cantilever_test_1.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
     if len(sys.argv) < 3:
         print("Usage: python merged_cae_test.py <liml_file_path> <excel_file_path>")
     else:
