@@ -273,7 +273,8 @@ def main2(file_path, phase):
         volume = float(elem.get('volume', 0))
         sum_volume += volume
 
-    internal_elem_dict = {}
+    bRemainAllEdge = False
+    optimize_elem_dict = {}
     density_zero_elem_list = []
     x_start = 0.0
     y_start = 0.0
@@ -286,35 +287,36 @@ def main2(file_path, phase):
     y_upper = y_start + y_length - y_length / edge_ratio_y
     y_lower = y_start + y_length / edge_ratio_y
     for index, elem in enumerate(merged_elem_list):
-        b_is_internal = True
+        b_need_optimize = True
         eid = elem.get('eid', 0)
-        node_data = elem['node_data']
-        for node in node_data:
-            if node.get('x', None) <= x_lower:
-                b_is_internal = False
-                break
-            if node.get('x', None) >= x_upper:
-                b_is_internal = False
-                break
-            if node.get('y', None) <= y_lower:
-                b_is_internal = False
-                break
-            if node.get('y', None) >= y_upper:
-                b_is_internal = False
-                break
-        if b_is_internal == True and phase_num > 1:
+        if bRemainAllEdge == True:
+            node_data = elem['node_data']
+            for node in node_data:
+                if node.get('x', None) <= x_lower:
+                    b_need_optimize = False
+                    break
+                if node.get('x', None) >= x_upper:
+                    b_need_optimize = False
+                    break
+                if node.get('y', None) <= y_lower:
+                    b_need_optimize = False
+                    break
+                if node.get('y', None) >= y_upper:
+                    b_need_optimize = False
+                    break
+        if b_need_optimize == True and phase_num > 1:
             row_start_check_finish = 20
             dens_value_old = float(sheet.cell(row=row_start_check_finish + index + 1, column=col_start - 2).value)
             if dens_value_old >= (1.0 - decide_val_threshold - threshold):
-                b_is_internal = False
+                b_need_optimize = False
             if dens_value_old <= (decide_val_threshold + threshold):
-                b_is_internal = False
+                b_need_optimize = False
                 density_zero_elem_list.append(str(eid))
                 
-        if b_is_internal == True:
-            internal_elem_dict[eid] = elem
+        if b_need_optimize == True:
+            optimize_elem_dict[eid] = elem
 
-    if len(internal_elem_dict) == 0:
+    if len(optimize_elem_dict) == 0:
         logging.info("\n\n")
         logging.info("最適化が完了したため処理を終了します")
         return True
@@ -322,10 +324,10 @@ def main2(file_path, phase):
     start_time_2 = time.time()
     
     ising_index_eid_map = {}
-    nInternalid = len(internal_elem_dict)
+    nInternalid = len(optimize_elem_dict)
     h = defaultdict(int)
     J = defaultdict(int)
-    for index, (key, elem) in enumerate(internal_elem_dict.items()):
+    for index, (key, elem) in enumerate(optimize_elem_dict.items()):
         eid = int(key)
         stressxx = elem.get('stressxx', 0)
         stressyy = elem.get('stressyy', 0)
@@ -361,8 +363,8 @@ def main2(file_path, phase):
         h[index] = h_first
 
         for j_index in range(index + 1, nInternalid):
-            # list_key = list(internal_elem_dict.keys())
-            # volume_j = internal_elem_dict[list_key[j_index]].get('volume', 0)
+            # list_key = list(optimize_elem_dict.keys())
+            # volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
             J[(index,j_index)] = 2.0 * cost_lambda_calc
 
     sampler = LeapHybridSampler()
@@ -400,7 +402,7 @@ def main2(file_path, phase):
         eid = index + 1
         sheet.cell(row=row_start + index + 1, column=col_start, value=eid)
         dens_value = 0
-        if str(eid) not in internal_elem_dict:
+        if str(eid) not in optimize_elem_dict:
             if str(eid) in density_zero_elem_list:
                 dens_value = 1.0e-9
             else:
