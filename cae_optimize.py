@@ -28,9 +28,9 @@ initial_condition_data = {
     "initial_volume": 2800.0,
     "cost_lambda": 10,
     "cost_lambda_n": 100,
-    "loop_num": 100,
+    "loop_num": 1,
     "decide_val_threshold": 0.1,
-    "start_phase_num": 81,
+    "start_phase_num": 1,
 }
 
 logging.basicConfig(level=logging.INFO, 
@@ -119,7 +119,8 @@ def renew_excel():
 def main(file_path):
     loop_num = initial_condition_data['loop_num']
     start_phase_num = initial_condition_data['start_phase_num'] - 1
-    if loop_num <= start_phase_num:
+    bUpdateExcel = True
+    if loop_num <= start_phase_num or bUpdateExcel:
         renew_excel()
     # for i in range(loop_num):
     for i in range(start_phase_num, loop_num):
@@ -549,7 +550,7 @@ def main2(file_path, phase):
     return True
 
 if __name__ == '__main__':
-    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\cantilever_test_1.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
+    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\beam1_opti_1_org.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
     if len(sys.argv) < 3:
         print("Usage: python merged_cae_test.py <liml_file_path> <excel_file_path>")
     else:
