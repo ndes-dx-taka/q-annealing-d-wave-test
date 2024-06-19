@@ -323,6 +323,7 @@ def main2(file_path, phase):
             
     start_time_2 = time.time()
     
+    energy_part_elem_dict = {}
     ising_index_eid_map = {}
     nInternalid = len(optimize_elem_dict)
     h = defaultdict(int)
@@ -356,6 +357,8 @@ def main2(file_path, phase):
         k_0 = (alpha_value - beta_value) / 2.0
         kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
         l_0 = density_now * sum_volume - initial_density * initial_volume
+
+        energy_part_elem_dict[eid] = kappa_i
 
         scale_lambda = 1.0
         cost_lambda_calc = cost_lambda * pow(density_now, (1 - density_power)) * kappa_i / scale_lambda
@@ -397,6 +400,7 @@ def main2(file_path, phase):
     cell_width = width / div_x
     cell_height = height / div_y
     data = np.zeros((div_y, div_x))
+    data2 = np.zeros((div_y, div_x))
 
     for index, value in enumerate(merged_elem_list):
         eid = index + 1
@@ -421,6 +425,9 @@ def main2(file_path, phase):
 
         sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
 
+        energy_part = energy_part_elem_dict[eid]
+        sheet.cell(row=row_start + index + 1, column=col_start + 2, value=float(energy_part))
+
         mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngs_modulus
 
         center_x = next((elem['center_x'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
@@ -428,19 +435,36 @@ def main2(file_path, phase):
         cell_x = int(center_x // cell_width)
         cell_y = int(center_y // cell_height)
         data[cell_y, cell_x] = dens_value
+        data2[cell_y, cell_x] = energy_part
 
-    plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height])
-    plt.colorbar()
-    plt.title("要素の密度分布")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    temp_image_path = "optimize_cae_temp.png"
-    plt.savefig(temp_image_path)
-    plt.close()
     new_sheet_name = "Image on phase " + str(phase_num)
     new_sheet = workbook.create_sheet(new_sheet_name)
+
+    plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=1)
+    plt.colorbar()
+    plt.title("Density distribution of elements")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    temp_image_path = "optimize_cae_density_temp.png"
+    plt.savefig(temp_image_path)
+    plt.close()
+
+    plt.imshow(data2, cmap='viridis', origin='lower', extent=[0, width, 0, height])
+    plt.colorbar()
+    plt.title("distribution of {νσi}T{σi}vi/E0")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    temp_image_path_2 = "optimize_cae_density_temp_2.png"
+    plt.savefig(temp_image_path_2)
+    plt.close()
+
+    new_sheet['A1'] = '要素の密度分布'
     img = Image(temp_image_path)
-    new_sheet.add_image(img, 'A1')
+    new_sheet.add_image(img, 'A3')
+
+    new_sheet['K1'] = '{νσi}T{σi}vi/E0 の分布'
+    img = Image(temp_image_path_2)
+    new_sheet.add_image(img, 'K3')
 
     phase_num += 1
     sheet.cell(row=10, column=1, value=phase_num)
@@ -546,6 +570,7 @@ def main2(file_path, phase):
 
     workbook.save(sys.argv[2])
     os.remove(temp_image_path)
+    os.remove(temp_image_path_2)
 
     print(f"success optimization on phase {phase_num - 1}")
 
