@@ -28,7 +28,9 @@ initial_condition_data = {
     "initial_volume": 2800.0,
     "cost_lambda": 10,
     "cost_lambda_n": 100,
-    "loop_num": 2
+    "loop_num": 100,
+    "decide_val_threshold": 0.1,
+    "start_phase_num": 81,
 }
 
 logging.basicConfig(level=logging.INFO, 
@@ -95,9 +97,32 @@ def increment_phase_number(filename):
         new_filename = filename.replace('.liml', '_phase_1.liml')
     return new_filename
 
+def renew_excel():
+    # ファイルのパスを定義
+    original_file = sys.argv[2]
+    backup_file = "C:\\work\\github\\q-annealing-d-wave-test\\result_summary_bak.xlsx"
+
+    # 元のファイルを削除
+    if os.path.exists(original_file):
+        os.remove(original_file)
+        print(f"{original_file} を削除しました。")
+    else:
+        print(f"{original_file} は存在しません。")
+
+    # バックアップファイルをコピーして新しい名前で保存
+    if os.path.exists(backup_file):
+        shutil.copy(backup_file, original_file)
+        print(f"{backup_file} を {original_file} としてコピーしました。")
+    else:
+        print(f"{backup_file} は存在しません。")
+
 def main(file_path):
     loop_num = initial_condition_data['loop_num']
-    for i in range(loop_num):
+    start_phase_num = initial_condition_data['start_phase_num'] - 1
+    if loop_num <= start_phase_num:
+        renew_excel()
+    # for i in range(loop_num):
+    for i in range(start_phase_num, loop_num):
         result = main2(file_path, i)
         if result == False:
             logging.error(f"{i}/{loop_num}の処理で失敗しました")
@@ -115,6 +140,9 @@ def main2(file_path, phase):
     cost_lambda = initial_condition_data["cost_lambda"]
     cost_lambda_n = initial_condition_data["cost_lambda_n"]
     loop_num = initial_condition_data["loop_num"]
+    decide_val_threshold = initial_condition_data["decide_val_threshold"]
+
+    threshold = 0.001
 
     sheet.cell(row=5, column=1, value=f"{str(initial_density)}")
     sheet.cell(row=5, column=2, value=f"{str(density_increment)}")
@@ -124,6 +152,7 @@ def main2(file_path, phase):
     sheet.cell(row=5, column=6, value=f"{str(cost_lambda)}")
     sheet.cell(row=5, column=7, value=f"{str(cost_lambda_n)}")
     sheet.cell(row=5, column=8, value=f"{str(loop_num)}")
+    sheet.cell(row=5, column=9, value=f"{str(decide_val_threshold)}")
 
     phase_num = sheet.cell(row=10, column=1).value
     row_start = 13
@@ -244,6 +273,7 @@ def main2(file_path, phase):
         sum_volume += volume
 
     internal_elem_dict = {}
+    density_zero_elem_list = []
     x_start = 0.0
     y_start = 0.0
     x_length = 70.0
@@ -254,8 +284,9 @@ def main2(file_path, phase):
     x_lower = x_start + x_length / edge_ratio_x
     y_upper = y_start + y_length - y_length / edge_ratio_y
     y_lower = y_start + y_length / edge_ratio_y
-    for elem in merged_elem_list:
+    for index, elem in enumerate(merged_elem_list):
         b_is_internal = True
+        eid = elem.get('eid', 0)
         node_data = elem['node_data']
         for node in node_data:
             if node.get('x', None) <= x_lower:
@@ -270,9 +301,22 @@ def main2(file_path, phase):
             if node.get('y', None) >= y_upper:
                 b_is_internal = False
                 break
+        if b_is_internal == True and phase_num > 1:
+            row_start_check_finish = 20
+            dens_value_old = float(sheet.cell(row=row_start_check_finish + index + 1, column=col_start - 2).value)
+            if dens_value_old >= (1.0 - decide_val_threshold - threshold):
+                b_is_internal = False
+            if dens_value_old <= (decide_val_threshold + threshold):
+                b_is_internal = False
+                density_zero_elem_list.append(str(eid))
+                
         if b_is_internal == True:
-            eid = elem.get('eid', 0)
             internal_elem_dict[eid] = elem
+
+    if len(internal_elem_dict) == 0:
+        logging.info("\n\n")
+        logging.info("最適化が完了したため処理を終了します")
+        return True
             
     start_time_2 = time.time()
     
@@ -299,10 +343,10 @@ def main2(file_path, phase):
 
         density_plus_delta = density_now + density_increment
         density_minus_delta = density_now - density_increment
-        if density_plus_delta >= 1.0:
-            density_plus_delta = 1.0
-        if density_minus_delta <= 0.0:
-            density_minus_delta = 0.001
+        # if density_plus_delta >= (1.0 - decide_val_threshold - threshold):
+        #     density_plus_delta = 1.0
+        # if density_minus_delta <= (decide_val_threshold + threshold):
+        #     density_minus_delta = 0.00001
 
         alpha_value = pow(density_plus_delta, (1 - density_power))
         beta_value = pow(density_minus_delta, (1 - density_power))
@@ -356,7 +400,10 @@ def main2(file_path, phase):
         sheet.cell(row=row_start + index + 1, column=col_start, value=eid)
         dens_value = 0
         if str(eid) not in internal_elem_dict:
-            dens_value = 1.0
+            if str(eid) in density_zero_elem_list:
+                dens_value = 1.0e-9
+            else:
+                dens_value = 1.0
         else:
             dens_value_old = initial_density
             if not phase_num == 1:
@@ -364,10 +411,10 @@ def main2(file_path, phase):
             ising_index = ising_index_eid_map[eid]
             ising_value = ising_index_dict[ising_index]
             dens_value = dens_value_old + density_increment * ising_value
-            if dens_value >= 1.0:
-                dens_value = 1.0
-            if dens_value <= 0.0:
-                dens_value = 0.001
+            # if dens_value >= (1.0 - decide_val_threshold - threshold):
+            #     dens_value = 1.0
+            # if dens_value <= (decide_val_threshold + threshold):
+            #     dens_value = 0.00001
 
         sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
 
