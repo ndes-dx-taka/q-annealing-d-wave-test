@@ -22,15 +22,15 @@ from xml.etree import ElementTree as ET
 
 initial_condition_data = {
     "initial_density": 0.5,
-    "density_increment": 0.05,
+    "density_increment": 0.1,
     "density_power": 2.0,
     "initial_youngs_modulus": 2.0e+5,
     "initial_volume": 2800.0,
     "cost_lambda": 10,
     "cost_lambda_n": 100,
-    "loop_num": 1,
+    "loop_num": 50,
     "decide_val_threshold": 0.1,
-    "start_phase_num": 1,
+    "start_phase_num": 31,
 }
 
 logging.basicConfig(level=logging.INFO, 
@@ -119,8 +119,8 @@ def renew_excel():
 def main(file_path):
     loop_num = initial_condition_data['loop_num']
     start_phase_num = initial_condition_data['start_phase_num'] - 1
-    bUpdateExcel = True
-    if loop_num <= start_phase_num or bUpdateExcel:
+    bAlwaysUpdateExcel = False
+    if loop_num <= start_phase_num or bAlwaysUpdateExcel:
         renew_excel()
     # for i in range(loop_num):
     for i in range(start_phase_num, loop_num):
@@ -358,34 +358,51 @@ def main2(file_path, phase):
         kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
         l_0 = density_now * sum_volume - initial_density * initial_volume
 
-        energy_part_elem_dict[eid] = kappa_i
+        # energy_part_elem_dict[eid] = kappa_i
 
         scale_lambda = 1.0
         cost_lambda_calc = cost_lambda * pow(density_now, (1 - density_power)) * kappa_i / scale_lambda
         h_first = k_0 * kappa_i
         h[index] = h_first
 
+        energy_part_elem_dict[eid] = h_first
+
         for j_index in range(index + 1, nInternalid):
             # list_key = list(optimize_elem_dict.keys())
             # volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
             J[(index,j_index)] = 2.0 * cost_lambda_calc
-
-    sampler = LeapHybridSampler()
-    response = sampler.sample_ising(h, J)
-
+    
     ising_index_dict = {}
-    for sample, E in response.data(fields=['sample','energy']):
-        S_minus_1 = [k for k,v in sample.items() if v == -1]
-        S_plus_1 = [k for k,v in sample.items() if v == 1]
+    bUseOptimization = False
 
-        for elem in S_minus_1:
-            ising_index_dict[elem] = -1
+    if bUseOptimization:
+        sampler = LeapHybridSampler()
+        response = sampler.sample_ising(h, J)
 
-        for elem in S_plus_1:
-            ising_index_dict[elem] = 1
+        for sample, E in response.data(fields=['sample','energy']):
+            S_minus_1 = [k for k,v in sample.items() if v == -1]
+            S_plus_1 = [k for k,v in sample.items() if v == 1]
 
-        print(f"イジングモデルの各要素の最適化後の値は: {ising_index_dict} となる")
+            for elem in S_minus_1:
+                ising_index_dict[elem] = -1
 
+            for elem in S_plus_1:
+                ising_index_dict[elem] = 1
+
+            print(f"イジングモデルの各要素の最適化後の値は: {ising_index_dict} となる")
+    else:
+        sorted_energy_part_elem_dict = sorted(energy_part_elem_dict.items(), key=lambda x: x[1], reverse=True)
+        half_size = len(sorted_energy_part_elem_dict) // 2
+
+        temp_ising_index_dict = {}
+        for i, (key, value) in enumerate(sorted_energy_part_elem_dict):
+            isingId = key - 1
+            if i < half_size:
+                temp_ising_index_dict[isingId] = -1
+            else:
+                temp_ising_index_dict[isingId] = 1
+
+        ising_index_dict = dict(sorted(temp_ising_index_dict.items()))
 
     start_time_3 = time.time()
     mat_youngmodulus = {}
@@ -416,7 +433,8 @@ def main2(file_path, phase):
             if not phase_num == 1:
                 dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
             ising_index = ising_index_eid_map[eid]
-            ising_value = ising_index_dict[ising_index]
+            ising_value = ising_index_dict[ising_index] if bUseOptimization else ising_index_dict[index]
+            # ising_value = ising_index_dict[ising_index]
             dens_value = dens_value_old + density_increment * ising_value
             # if dens_value >= (1.0 - decide_val_threshold - threshold):
             #     dens_value = 1.0
@@ -425,7 +443,7 @@ def main2(file_path, phase):
 
         sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
 
-        energy_part = energy_part_elem_dict[eid]
+        energy_part = energy_part_elem_dict.get(eid, 0)
         sheet.cell(row=row_start + index + 1, column=col_start + 2, value=float(energy_part))
 
         mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngs_modulus
