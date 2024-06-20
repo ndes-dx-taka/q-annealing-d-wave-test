@@ -21,16 +21,16 @@ import win32gui
 from xml.etree import ElementTree as ET
 
 initial_condition_data = {
-    "initial_density": 0.5,
-    "density_increment": 0.1,
-    "density_power": 2.0,
+    "target_density": 0.5,
+    "density_increment": 0.2,
+    "density_power": 3.0,
     "initial_youngs_modulus": 2.0e+5,
     "initial_volume": 2800.0,
     "cost_lambda": 10,
     "cost_lambda_n": 100,
-    "loop_num": 50,
+    "loop_num": 3,
     "decide_val_threshold": 0.1,
-    "start_phase_num": 31,
+    "start_phase_num": 1,
 }
 
 logging.basicConfig(level=logging.INFO, 
@@ -119,7 +119,7 @@ def renew_excel():
 def main(file_path):
     loop_num = initial_condition_data['loop_num']
     start_phase_num = initial_condition_data['start_phase_num'] - 1
-    bAlwaysUpdateExcel = False
+    bAlwaysUpdateExcel = True
     if loop_num <= start_phase_num or bAlwaysUpdateExcel:
         renew_excel()
     # for i in range(loop_num):
@@ -133,7 +133,7 @@ def main2(file_path, phase):
     workbook = openpyxl.load_workbook(sys.argv[2])
     sheet = workbook["Sheet1"]
 
-    initial_density = initial_condition_data["initial_density"]
+    target_density = initial_condition_data["target_density"]
     density_increment = initial_condition_data["density_increment"]
     density_power = initial_condition_data["density_power"]
     initial_youngs_modulus = initial_condition_data["initial_youngs_modulus"]
@@ -145,7 +145,7 @@ def main2(file_path, phase):
 
     threshold = 0.001
 
-    sheet.cell(row=5, column=1, value=f"{str(initial_density)}")
+    sheet.cell(row=5, column=1, value=f"{str(target_density)}")
     sheet.cell(row=5, column=2, value=f"{str(density_increment)}")
     sheet.cell(row=5, column=3, value=f"{str(density_power)}")
     sheet.cell(row=5, column=4, value=f"{str(initial_youngs_modulus)}")
@@ -328,6 +328,7 @@ def main2(file_path, phase):
     nInternalid = len(optimize_elem_dict)
     h = defaultdict(int)
     J = defaultdict(int)
+    first_density = 1.0
     for index, (key, elem) in enumerate(optimize_elem_dict.items()):
         eid = int(key)
         stressxx = elem.get('stressxx', 0)
@@ -340,7 +341,7 @@ def main2(file_path, phase):
 
         density_now = 0
         if phase_num == 1:
-            density_now = initial_density
+            density_now = first_density
         else:
             eid_row = eid + 20
             density_now = sheet.cell(row=eid_row, column=col_start - 2).value
@@ -356,24 +357,27 @@ def main2(file_path, phase):
         beta_value = pow(density_minus_delta, (1 - density_power))
         k_0 = (alpha_value - beta_value) / 2.0
         kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
-        l_0 = density_now * sum_volume - initial_density * initial_volume
+        l_0 = density_now * sum_volume - target_density * initial_volume
 
         # energy_part_elem_dict[eid] = kappa_i
 
         scale_lambda = 1.0
         cost_lambda_calc = cost_lambda * pow(density_now, (1 - density_power)) * kappa_i / scale_lambda
         h_first = k_0 * kappa_i
-        h[index] = h_first
+        h_second = 2.0 * cost_lambda_calc * l_0 * density_increment * volume
+        h[index] = h_first + h_second
 
-        energy_part_elem_dict[eid] = h_first
+        # energy_part_elem_dict[eid] = h_first
+        energy_part_elem_dict[eid] = h[index]
 
         for j_index in range(index + 1, nInternalid):
-            # list_key = list(optimize_elem_dict.keys())
-            # volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
+            list_key = list(optimize_elem_dict.keys())
+            volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
+            J[(index,j_index)] = 2.0 * cost_lambda * density_increment * density_increment * volume * volume_j
             J[(index,j_index)] = 2.0 * cost_lambda_calc
     
     ising_index_dict = {}
-    bUseOptimization = False
+    bUseOptimization = True
 
     if bUseOptimization:
         sampler = LeapHybridSampler()
@@ -429,7 +433,7 @@ def main2(file_path, phase):
             else:
                 dens_value = 1.0
         else:
-            dens_value_old = initial_density
+            dens_value_old = first_density
             if not phase_num == 1:
                 dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
             ising_index = ising_index_eid_map[eid]
@@ -458,7 +462,7 @@ def main2(file_path, phase):
     new_sheet_name = "Image on phase " + str(phase_num)
     new_sheet = workbook.create_sheet(new_sheet_name)
 
-    plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=1)
+    plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=2)
     plt.colorbar()
     plt.title("Density distribution of elements")
     plt.xlabel("x")
