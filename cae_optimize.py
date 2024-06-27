@@ -23,7 +23,7 @@ from xml.etree import ElementTree as ET
 initial_condition_data = {
     "target_density": 0.5,
     "density_increment": 0.2,
-    "density_power": 3.0,
+    "density_power": 2.0,
     "initial_youngs_modulus": 2.0e+5,
     "initial_volume": 2800.0,
     "cost_lambda": 10,
@@ -328,7 +328,7 @@ def main2(file_path, phase):
     nInternalid = len(optimize_elem_dict)
     h = defaultdict(int)
     J = defaultdict(int)
-    first_density = 1.0
+    first_density = target_density
     for index, (key, elem) in enumerate(optimize_elem_dict.items()):
         eid = int(key)
         stressxx = elem.get('stressxx', 0)
@@ -364,17 +364,45 @@ def main2(file_path, phase):
         scale_lambda = 1.0
         cost_lambda_calc = cost_lambda * pow(density_now, (1 - density_power)) * kappa_i / scale_lambda
         h_first = k_0 * kappa_i
-        h_second = 2.0 * cost_lambda_calc * l_0 * density_increment * volume
-        h[index] = h_first + h_second
+        # h_second = 2.0 * cost_lambda_calc * l_0 * density_increment * volume
+        # h[index] = h_first + h_second
+        h[index] = h_first
 
         # energy_part_elem_dict[eid] = h_first
         energy_part_elem_dict[eid] = h[index]
 
+        # for j_index in range(index + 1, nInternalid):
+        #     list_key = list(optimize_elem_dict.keys())
+        #     volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
+        #     # J[(index,j_index)] = 2.0 * cost_lambda_calc * density_increment * density_increment * volume * volume_j
+        #     # J[(index,j_index)] = 2.0 * cost_lambda_calc
+        #     scale = pow(density_now, (1 - density_power))
+        #     J[(index,j_index)] = 2.0 * cost_lambda * scale
+
+    energy_part_values = list(energy_part_elem_dict.values())
+    mean_value = np.mean(energy_part_values)
+    median_value = np.median(energy_part_values)
+    max_value = np.amax(energy_part_values)
+    cost_scale = max_value
+    logging.info(f"energy_part_valuesの平均値：{mean_value}")
+    logging.info(f"energy_part_valuesの中央値：{median_value}")
+    logging.info(f"energy_part_valuesの最大値：{max_value}")
+
+    for index, (key, elem) in enumerate(optimize_elem_dict.items()):
+        density_now = 0
+        if phase_num == 1:
+            density_now = first_density
+        else:
+            eid_row = eid + 20
+            density_now = sheet.cell(row=eid_row, column=col_start - 2).value
+        
         for j_index in range(index + 1, nInternalid):
             list_key = list(optimize_elem_dict.keys())
             volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
-            J[(index,j_index)] = 2.0 * cost_lambda * density_increment * density_increment * volume * volume_j
-            J[(index,j_index)] = 2.0 * cost_lambda_calc
+            # J[(index,j_index)] = 2.0 * cost_lambda_calc * density_increment * density_increment * volume * volume_j
+            # J[(index,j_index)] = 2.0 * cost_lambda_calc
+            # scale = pow(density_now, (1 - density_power))
+            J[(index,j_index)] = 2.0 * cost_lambda * cost_scale
     
     ising_index_dict = {}
     bUseOptimization = True
