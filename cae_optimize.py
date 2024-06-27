@@ -28,7 +28,7 @@ initial_condition_data = {
     "initial_volume": 2800.0,
     "cost_lambda": 10,
     "cost_lambda_n": 100,
-    "loop_num": 3,
+    "loop_num": 1,
     "decide_val_threshold": 0.1,
     "start_phase_num": 1,
 }
@@ -268,11 +268,6 @@ def main2(file_path, phase):
     sheet.cell(row=row_start, column=col_start + 1, value=f"{str(elapsed_time_1)}")
     row_start += 1
 
-    sum_volume = 0.0
-    for elem in merged_elem_list:
-        volume = float(elem.get('volume', 0))
-        sum_volume += volume
-
     bRemainAllEdge = False
     optimize_elem_dict = {}
     density_zero_elem_list = []
@@ -322,13 +317,29 @@ def main2(file_path, phase):
         return True
             
     start_time_2 = time.time()
+
+    energy_list_for_scale = []
+    volume_list_for_scale = []
+
+    first_density = target_density
+    sum_volume = 0.0
+    l_i_dens_part = 0.0
+    for index, (key, elem) in enumerate(optimize_elem_dict.items()):
+        volume = float(elem.get('volume', 0))
+        sum_volume += volume
+        density_now = 0
+        if phase_num == 1:
+            density_now = first_density
+        else:
+            eid_row = eid + 20
+            density_now = sheet.cell(row=eid_row, column=col_start - 2).value
+        l_i_dens_part += (density_now * volume)
     
     energy_part_elem_dict = {}
     ising_index_eid_map = {}
     nInternalid = len(optimize_elem_dict)
     h = defaultdict(int)
     J = defaultdict(int)
-    first_density = target_density
     for index, (key, elem) in enumerate(optimize_elem_dict.items()):
         eid = int(key)
         stressxx = elem.get('stressxx', 0)
@@ -348,62 +359,111 @@ def main2(file_path, phase):
 
         density_plus_delta = density_now + density_increment
         density_minus_delta = density_now - density_increment
-        # if density_plus_delta >= (1.0 - decide_val_threshold - threshold):
-        #     density_plus_delta = 1.0
-        # if density_minus_delta <= (decide_val_threshold + threshold):
-        #     density_minus_delta = 0.00001
 
         alpha_value = pow(density_plus_delta, (1 - density_power))
         beta_value = pow(density_minus_delta, (1 - density_power))
-        k_0 = (alpha_value - beta_value) / 2.0
+
         kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
-        l_0 = density_now * sum_volume - target_density * initial_volume
+        
+        energy_list_for_scale.append(alpha_value * kappa_i)
+        energy_list_for_scale.append(beta_value * kappa_i)
 
-        # energy_part_elem_dict[eid] = kappa_i
+        volume_list_for_scale.append(alpha_value * volume - target_density * sum_volume / nInternalid)
+        volume_list_for_scale.append(alpha_value * volume - target_density * sum_volume / nInternalid)
 
-        scale_lambda = 1.0
-        cost_lambda_calc = cost_lambda * pow(density_now, (1 - density_power)) * kappa_i / scale_lambda
-        h_first = k_0 * kappa_i
-        # h_second = 2.0 * cost_lambda_calc * l_0 * density_increment * volume
-        # h[index] = h_first + h_second
-        h[index] = h_first
+    mean_of_energy_list = np.mean(energy_list_for_scale)
+    std_of_energy_list = np.std(energy_list_for_scale)
 
-        # energy_part_elem_dict[eid] = h_first
-        energy_part_elem_dict[eid] = h[index]
+    standardized_data = (energy_list_for_scale - mean_of_energy_list) / std_of_energy_list
 
-        # for j_index in range(index + 1, nInternalid):
-        #     list_key = list(optimize_elem_dict.keys())
-        #     volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
-        #     # J[(index,j_index)] = 2.0 * cost_lambda_calc * density_increment * density_increment * volume * volume_j
-        #     # J[(index,j_index)] = 2.0 * cost_lambda_calc
-        #     scale = pow(density_now, (1 - density_power))
-        #     J[(index,j_index)] = 2.0 * cost_lambda * scale
+    mean_of_volume_list = np.mean(volume_list_for_scale)
+    std_of_volume_list = np.std(volume_list_for_scale)
 
-    energy_part_values = list(energy_part_elem_dict.values())
-    mean_value = np.mean(energy_part_values)
-    median_value = np.median(energy_part_values)
-    max_value = np.amax(energy_part_values)
-    cost_scale = max_value
-    logging.info(f"energy_part_valuesの平均値：{mean_value}")
-    logging.info(f"energy_part_valuesの中央値：{median_value}")
-    logging.info(f"energy_part_valuesの最大値：{max_value}")
+    standardized_data_2 = (energy_list_for_scale - mean_of_volume_list) / std_of_volume_list
 
+    new_sheet_name = "Image on phase " + str(phase_num)
+    new_sheet = workbook.create_sheet(new_sheet_name)
+
+    first_index_list = []
+    second_index_list = []
     for index, (key, elem) in enumerate(optimize_elem_dict.items()):
+        eid = int(key)
+        stressxx = elem.get('stressxx', 0)
+        stressyy = elem.get('stressyy', 0)
+        stressxy = elem.get('stressxy', 0)
+        poissonratio = float(elem.get('poissonratio', 0))
+        volume = float(elem.get('volume', 0))
+
+        ising_index_eid_map[eid] = index
+
         density_now = 0
         if phase_num == 1:
             density_now = first_density
         else:
             eid_row = eid + 20
             density_now = sheet.cell(row=eid_row, column=col_start - 2).value
-        
+
+        density_plus_delta = density_now + density_increment
+        density_minus_delta = density_now - density_increment
+
+        alpha_value = pow(density_plus_delta, (1 - density_power))
+        beta_value = pow(density_minus_delta, (1 - density_power))
+        k_0 = (alpha_value - beta_value) / 2.0
+        kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
+        l_i_part = l_i_dens_part - target_density * sum_volume - mean_of_volume_list * nInternalid
+        # l_i_part = density_now * sum_volume - target_density * sum_volume - mean_of_volume_list * nInternalid + target_density * mean_of_volume_list
+        l_i = l_i_part / std_of_volume_list
+
+        scale_lambda = 1.0
+        h_first = k_0 * kappa_i / std_of_energy_list
+        h_second = 2.0 * cost_lambda * l_i * density_increment * volume / std_of_volume_list
+        h[index] = h_first + h_second
+        first_index_list.append(h_first)
+        second_index_list.append(h_second)
+
+        energy_part_elem_dict[eid] = h[index]
+
         for j_index in range(index + 1, nInternalid):
             list_key = list(optimize_elem_dict.keys())
             volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
-            # J[(index,j_index)] = 2.0 * cost_lambda_calc * density_increment * density_increment * volume * volume_j
-            # J[(index,j_index)] = 2.0 * cost_lambda_calc
-            # scale = pow(density_now, (1 - density_power))
-            J[(index,j_index)] = 2.0 * cost_lambda * cost_scale
-    
+            J[(index,j_index)] = 2.0 * cost_lambda * density_increment * density_increment * volume * volume_j / std_of_volume_list / std_of_volume_list
+
+    print("first_index_list\n")
+    print(first_index_list)
+    print("second_index_list\n")
+    print(second_index_list)
+
+    plt.figure()
+    plt.plot(first_index_list, marker='o')
+    plt.xlabel('Index')
+    plt.ylabel('First Value')
+    plt.title('First Value Data Plot')
+    temp_first_image_path = "first_image.png"
+    plt.savefig(temp_first_image_path)
+    plt.close()
+    img = Image(temp_first_image_path)
+    new_sheet.add_image(img, 'A25')
+
+    plt.figure()
+    plt.plot(second_index_list, marker='o')
+    plt.xlabel('Index')
+    plt.ylabel('second Value')
+    plt.title('second Value Data Plot')
+    temp_second_image_path = "seccond_image.png"
+    plt.savefig(temp_second_image_path)
+    plt.close()
+    img = Image(temp_second_image_path)
+    new_sheet.add_image(img, 'K25')
+
+    # energy_part_values = list(energy_part_elem_dict.values())
+    # mean_value = np.mean(energy_part_values)
+    # median_value = np.median(energy_part_values)
+    # max_value = np.amax(energy_part_values)
+    # cost_scale = max_value
+    # logging.info(f"energy_part_valuesの平均値：{mean_value}")
+    # logging.info(f"energy_part_valuesの中央値：{median_value}")
+    # logging.info(f"energy_part_valuesの最大値：{max_value}")
+
     ising_index_dict = {}
     bUseOptimization = True
 
@@ -486,9 +546,6 @@ def main2(file_path, phase):
         cell_y = int(center_y // cell_height)
         data[cell_y, cell_x] = dens_value
         data2[cell_y, cell_x] = energy_part
-
-    new_sheet_name = "Image on phase " + str(phase_num)
-    new_sheet = workbook.create_sheet(new_sheet_name)
 
     plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=2)
     plt.colorbar()
@@ -590,28 +647,31 @@ def main2(file_path, phase):
         if mechanical_tag is not None:
             mechanical_tag.set("youngsmodulus", str(youngmodulus_value))
     
-    new_file_name = increment_phase_number(input_liml_file_name)
-    new_file_content = ET.tostring(root, encoding='unicode')
-    with open(new_file_name, 'w', encoding='utf-8') as f:
-        f.write(new_file_content)
+    bDoSolver = False
 
-    logging.info(f"最適化後のファイル名：{new_file_name}")
+    if bDoSolver:
+        new_file_name = increment_phase_number(input_liml_file_name)
+        new_file_content = ET.tostring(root, encoding='unicode')
+        with open(new_file_name, 'w', encoding='utf-8') as f:
+            f.write(new_file_content)
 
-    proc = subprocess.run(["explorer", new_file_name])
-    time.sleep(15)
-    hwnd = win32gui.FindWindow(None, f"{new_file_name} - LISA")
-    if hwnd:
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
-        win32gui.SetForegroundWindow(hwnd)
-    pyautogui.moveTo(158, 70, duration=1)
-    pyautogui.click()
-    time.sleep(20)
-    pyautogui.moveTo(1886, 4)
-    pyautogui.click()
-    time.sleep(3)
-    pyautogui.moveTo(867, 594)
-    pyautogui.click()
+        logging.info(f"最適化後のファイル名：{new_file_name}")
+
+        proc = subprocess.run(["explorer", new_file_name])
+        time.sleep(15)
+        hwnd = win32gui.FindWindow(None, f"{new_file_name} - LISA")
+        if hwnd:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+            win32gui.SetForegroundWindow(hwnd)
+        pyautogui.moveTo(158, 70, duration=1)
+        pyautogui.click()
+        time.sleep(20)
+        pyautogui.moveTo(1886, 4)
+        pyautogui.click()
+        time.sleep(3)
+        pyautogui.moveTo(867, 594)
+        pyautogui.click()
 
     end_time_4 = time.time()
     elapsed_time_4 = end_time_4 - start_time_4
@@ -621,6 +681,8 @@ def main2(file_path, phase):
     workbook.save(sys.argv[2])
     os.remove(temp_image_path)
     os.remove(temp_image_path_2)
+    os.remove(temp_first_image_path)
+    os.remove(temp_second_image_path)
 
     print(f"success optimization on phase {phase_num - 1}")
 
