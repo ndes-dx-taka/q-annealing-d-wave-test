@@ -12,6 +12,7 @@ import os
 import pandas as pd
 import pyautogui
 import re
+from shapely.geometry import Point, Polygon
 import statistics
 import subprocess
 import sys
@@ -22,16 +23,21 @@ import win32gui
 from xml.etree import ElementTree as ET
 
 initial_condition_data = {
+    "width": 70,
+    "height": 40,
     "target_density": 0.5,
     "density_increment": 0.1,
     "density_power": 2.0,
     "initial_youngs_modulus": 2.0e+5,
     "initial_volume": 2800.0,
-    "cost_lambda": 10,
+    "cost_lambda": 5,
     "cost_lambda_n": 100,
-    "loop_num": 3,
+    "loop_num": 20,
     "decide_val_threshold": 0.1,
     "start_phase_num": 1,
+    "alwaysUpdateExcel" : 1,
+    "devide_num_x" : 700,
+    "devide_num_y" : 400
 }
 
 logging.basicConfig(level=logging.INFO, 
@@ -139,7 +145,10 @@ def calc_seiyaku_bunsan(n):
 def main(file_path):
     loop_num = initial_condition_data['loop_num']
     start_phase_num = initial_condition_data['start_phase_num'] - 1
-    bAlwaysUpdateExcel = True
+    bAlwaysUpdateExcel = False
+    bAlwaysUpdateExcelval = initial_condition_data['alwaysUpdateExcel']
+    if str(bAlwaysUpdateExcelval) == "1":
+        bAlwaysUpdateExcel = True
     if loop_num <= start_phase_num or bAlwaysUpdateExcel:
         renew_excel()
     # for i in range(loop_num):
@@ -147,6 +156,17 @@ def main(file_path):
         result = main2(file_path, i)
         if result == False:
             logging.error(f"{i}/{loop_num}の処理で失敗しました")
+
+def find_vscode_window():
+    hwnd = None
+
+    def callback(handle, extra):
+        nonlocal hwnd
+        if "Visual Studio Code" in win32gui.GetWindowText(handle):
+            hwnd = handle
+
+    win32gui.EnumWindows(callback, None)
+    return hwnd
 
 def main2(file_path, phase):
     start_time_1 = time.time()
@@ -236,10 +256,17 @@ def main2(file_path, phase):
 
         area = calculate_quadrilateral_area(node_data)
         elem['area'] = area
-        center_x = sum(vertex['x'] for vertex in node_data) / 4
-        center_y = sum(vertex['y'] for vertex in node_data) / 4
-        elem['center_x'] = center_x
-        elem['center_y'] = center_y
+        points = []
+        for vertex in node_data:
+            points.append((float(vertex['x']), float(vertex['y'])))
+        polygon = Polygon(points)
+        elem['polygon'] = polygon
+        # center_x = sum(vertex['x'] for vertex in node_data) / 4
+        # center_y = sum(vertex['y'] for vertex in node_data) / 4
+        # elem['center_x'] = center_x
+        # elem['center_y'] = center_y
+        # elem['width_x'] = abs(node_data[1]['x'] - node_data[0]['x'])
+        # elem['width_y'] = abs(node_data[2]['y'] - node_data[1]['y'])
 
         thickness = float(elem.get('thickness', 1))  # Assuming a default thickness of 1 if not available
         elem['volume'] = area * thickness
@@ -448,7 +475,7 @@ def main2(file_path, phase):
         # l_i = l_i_part / std_of_volume_list
 
         scale_lambda = 1.0
-        h_first = k_0 * kappa_i / std_of_energy_list
+        h_first = k_0 * kappa_i / std_of_energy_list / np.sqrt(nInternalid) / 3.0
         # h_second = 2.0 * cost_lambda * l_i * density_increment * volume / std_of_volume_list
         # h[index] = h_first + h_second
         h[index] = h_first
@@ -462,7 +489,7 @@ def main2(file_path, phase):
             volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
             # J[(index,j_index)] = 2.0 * cost_lambda * density_increment * density_increment * volume * volume_j / std_of_volume_list / std_of_volume_list
             # J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / np.sqrt(bunsan)
-            J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / pow(std_of_volume_list, 2) / nInternalid
+            J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / pow(std_of_volume_list, 2) / nInternalid / 9.0
             # print(J[(index,j_index)])
 
     # print("energy_part_elem_dict")
@@ -541,12 +568,12 @@ def main2(file_path, phase):
     sheet.cell(row=row_start, column=col_start, value="Element number")
     sheet.cell(row=row_start, column=col_start + 1, value="Density")
     sheet.cell(row=row_start, column=col_start + 2, value="Energy part")
-    width, height = 70, 40
-    div_x, div_y = 46, 26
-    cell_width = width / div_x
-    cell_height = height / div_y
+    width = initial_condition_data["width"]
+    height = initial_condition_data["height"]
+    div_x = initial_condition_data['devide_num_x']
+    div_y = initial_condition_data['devide_num_y']
     data = np.zeros((div_y, div_x))
-    data2 = np.zeros((div_y, div_x))
+    # data2 = np.zeros((div_y, div_x))
 
     for index, value in enumerate(merged_elem_list):
         eid = index + 1
@@ -577,14 +604,29 @@ def main2(file_path, phase):
 
         mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngs_modulus
 
-        center_x = next((elem['center_x'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
-        center_y = next((elem['center_y'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
-        cell_x = int(center_x // cell_width)
-        cell_y = int(center_y // cell_height)
-        data[cell_y, cell_x] = dens_value
-        data2[cell_y, cell_x] = energy_part
+        # center_x = next((elem['center_x'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
+        # center_y = next((elem['center_y'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
+        # cell_width = next((elem['width_x'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
+        # cell_height = next((elem['width_y'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
+        # cell_x = int(center_x // cell_width)
+        # cell_y = int(center_y // cell_height)
+        # data[cell_y, cell_x] = dens_value
+        # data2[cell_y, cell_x] = energy_part
 
-    plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=2)
+        range_polygon = next((elem['polygon'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
+        block_width, block_height = width / div_x, height / div_y
+        min_x, min_y, max_x, max_y = range_polygon.bounds
+        start_x = max(int(min_x // block_width), 0)
+        end_x = min(int(np.ceil(max_x / block_width)), div_x)
+        start_y = max(int(min_y // block_height), 0)
+        end_y = min(int(np.ceil(max_y / block_height)), div_y)
+        for i in range(start_x, end_x):
+            for j in range(start_y, end_y):
+                block_right_top = Point((i + 1) * block_width, (j + 1) * block_height)
+                if range_polygon.contains(block_right_top):
+                    data[j, i] = dens_value
+
+    plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=1.1)
     plt.colorbar()
     plt.title("Density distribution of elements")
     plt.xlabel("x")
@@ -593,14 +635,14 @@ def main2(file_path, phase):
     plt.savefig(temp_image_path)
     plt.close()
 
-    plt.imshow(data2, cmap='viridis', origin='lower', extent=[0, width, 0, height])
-    plt.colorbar()
-    plt.title("distribution of {νσi}T{σi}vi/E0")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    temp_image_path_2 = "optimize_cae_density_temp_2.png"
-    plt.savefig(temp_image_path_2)
-    plt.close()
+    # plt.imshow(data2, cmap='viridis', origin='lower', extent=[0, width, 0, height])
+    # plt.colorbar()
+    # plt.title("distribution of {νσi}T{σi}vi/E0")
+    # plt.xlabel("x")
+    # plt.ylabel("y")
+    # temp_image_path_2 = "optimize_cae_density_temp_2.png"
+    # plt.savefig(temp_image_path_2)
+    # plt.close()
 
     new_sheet_name = "Image on phase " + str(phase_num)
     new_sheet = workbook.create_sheet(new_sheet_name)
@@ -609,9 +651,9 @@ def main2(file_path, phase):
     img = Image(temp_image_path)
     new_sheet.add_image(img, 'A3')
 
-    new_sheet['K1'] = '{νσi}T{σi}vi/E0 の分布'
-    img = Image(temp_image_path_2)
-    new_sheet.add_image(img, 'K3')
+    # new_sheet['K1'] = '{νσi}T{σi}vi/E0 の分布'
+    # img = Image(temp_image_path_2)
+    # new_sheet.add_image(img, 'K3')
 
     phase_num += 1
     sheet.cell(row=10, column=1, value=phase_num)
@@ -697,6 +739,10 @@ def main2(file_path, phase):
 
     logging.info(f"最適化後のファイル名：{new_file_name}")
 
+    hwndvscode = find_vscode_window()
+    if hwndvscode:
+        win32gui.ShowWindow(hwndvscode, win32con.SW_MINIMIZE)
+        # win32gui.SetWindowPos(hwndvscode, win32con.HWND_BOTTOM, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
     proc = subprocess.run(["explorer", new_file_name])
     time.sleep(15)
     hwnd = win32gui.FindWindow(None, f"{new_file_name} - LISA")
@@ -706,7 +752,7 @@ def main2(file_path, phase):
         win32gui.SetForegroundWindow(hwnd)
     pyautogui.moveTo(158, 70, duration=1)
     pyautogui.click()
-    time.sleep(20)
+    time.sleep(25)
     pyautogui.moveTo(1886, 4)
     pyautogui.click()
     time.sleep(3)
@@ -720,7 +766,7 @@ def main2(file_path, phase):
 
     workbook.save(sys.argv[2])
     os.remove(temp_image_path)
-    os.remove(temp_image_path_2)
+    # os.remove(temp_image_path_2)
     # os.remove(temp_first_image_path)
     # os.remove(temp_second_image_path)
 
@@ -729,7 +775,7 @@ def main2(file_path, phase):
     return True
 
 if __name__ == '__main__':
-    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\beam1_opti_1_org.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
+    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\cantilever_different_volume_1.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
     if len(sys.argv) < 3:
         print("Usage: python merged_cae_test.py <liml_file_path> <excel_file_path>")
     else:
