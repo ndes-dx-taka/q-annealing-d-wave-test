@@ -23,20 +23,20 @@ import win32gui
 from xml.etree import ElementTree as ET
 
 initial_condition_data = {
-    "width": 70,
+    "width": 140,
     "height": 40,
     "target_density": 0.5,
     "density_increment": 0.1,
     "density_power": 2.0,
     "initial_youngs_modulus": 2.0e+5,
-    "initial_volume": 2800.0,
+    "initial_volume": 5600.0,
     "cost_lambda": 5,
     "cost_lambda_n": 100,
-    "loop_num": 20,
+    "loop_num": 8,
     "decide_val_threshold": 0.1,
     "start_phase_num": 1,
-    "alwaysUpdateExcel" : 1,
-    "devide_num_x" : 700,
+    "alwaysUpdateExcel" : 1,  # 1の時にupdateする
+    "devide_num_x" : 1400,
     "devide_num_y" : 400
 }
 
@@ -122,25 +122,6 @@ def renew_excel():
         print(f"{backup_file} を {original_file} としてコピーしました。")
     else:
         print(f"{backup_file} は存在しません。")
-
-def expected_value(n):
-    sum_value = 0
-    for k in range(n + 1):
-        term = math.comb(n, k) * ((2 * k - n) ** 2) / (2 ** n)
-        sum_value += term
-    return sum_value
-
-def expected_value_2_zyou(n):
-    sum_value = 0
-    for k in range(n + 1):
-        term = math.comb(n, k) * ((2 * k - n) ** 4) / (2 ** n)
-        sum_value += term
-    return sum_value
-
-def calc_seiyaku_bunsan(n):
-    exp = expected_value(n)
-    exp_2_zyou = expected_value_2_zyou(n)
-    return (exp_2_zyou - exp)
 
 def main(file_path):
     loop_num = initial_condition_data['loop_num']
@@ -261,13 +242,6 @@ def main2(file_path, phase):
             points.append((float(vertex['x']), float(vertex['y'])))
         polygon = Polygon(points)
         elem['polygon'] = polygon
-        # center_x = sum(vertex['x'] for vertex in node_data) / 4
-        # center_y = sum(vertex['y'] for vertex in node_data) / 4
-        # elem['center_x'] = center_x
-        # elem['center_y'] = center_y
-        # elem['width_x'] = abs(node_data[1]['x'] - node_data[0]['x'])
-        # elem['width_y'] = abs(node_data[2]['y'] - node_data[1]['y'])
-
         thickness = float(elem.get('thickness', 1))  # Assuming a default thickness of 1 if not available
         elem['volume'] = area * thickness
 
@@ -369,26 +343,12 @@ def main2(file_path, phase):
     volume_list_for_scale = []
 
     first_density = target_density
-    # sum_volume = 0.0
-    # l_i_dens_part = 0.0
-    # for index, (key, elem) in enumerate(optimize_elem_dict.items()):
-    #     volume = float(elem.get('volume', 0))
-    #     sum_volume += volume
-    #     density_now = 0
-    #     if phase_num == 1:
-    #         density_now = first_density
-    #     else:
-    #         eid_row = eid + 20
-    #         density_now = sheet.cell(row=eid_row, column=col_start - 2).value
-    #     l_i_dens_part += (density_now * volume)
-    
     energy_part_elem_dict = {}
     ising_index_eid_map = {}
     nInternalid = len(optimize_elem_dict)
     h = defaultdict(int)
     J = defaultdict(int)
     energy_exp = 0.0
-    energy_exp_2_zyou = 0.0
     for index, (key, elem) in enumerate(optimize_elem_dict.items()):
         eid = int(key)
         stressxx = elem.get('stressxx', 0)
@@ -419,33 +379,14 @@ def main2(file_path, phase):
 
         energy_exp += alpha_value * kappa_i * 0.5 + beta_value * kappa_i * 0.5
 
-        alpha_value_2 = pow(density_plus_delta, (2 * (1 - density_power)))
-        beta_value_2 = pow(density_minus_delta, (2 * (1 - density_power)))
-
-        energy_exp_2_zyou += alpha_value_2 * pow(kappa_i, 2) * 0.5 + beta_value_2 * pow(kappa_i, 2) * 0.5
-
-        # volume_list_for_scale.append(alpha_value * volume - target_density * sum_volume / nInternalid)
-        # volume_list_for_scale.append(alpha_value * volume - target_density * sum_volume / nInternalid)
-
         volume_list_for_scale.append(volume)
         volume_list_for_scale.append(-1.0 * volume)
 
-    mean_of_energy_list = np.mean(energy_list_for_scale)
     std_of_energy_list = np.std(energy_list_for_scale)
 
-    # bunsan_e = energy_exp_2_zyou - pow(energy_exp, 2)
-    # std_of_energy_list = np.sqrt(bunsan_e)
-
-    # standardized_data = (energy_list_for_scale - mean_of_energy_list) / std_of_energy_list
-
-    # mean_of_volume_list = np.mean(volume_list_for_scale)
     std_of_volume_list = np.std(volume_list_for_scale)
 
-    # standardized_data_2 = (volume_list_for_scale - mean_of_volume_list) / std_of_volume_list
-
     first_index_list = []
-    # second_index_list = []
-    # bunsan = calc_seiyaku_bunsan(nInternalid)
     for index, (key, elem) in enumerate(optimize_elem_dict.items()):
         eid = int(key)
         stressxx = elem.get('stressxx', 0)
@@ -470,63 +411,18 @@ def main2(file_path, phase):
         beta_value = pow(density_minus_delta, (1 - density_power))
         k_0 = (alpha_value - beta_value) / 2.0
         kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
-        # l_i_part = l_i_dens_part - target_density * sum_volume - mean_of_volume_list * nInternalid
-        # l_i_part = density_now * sum_volume - target_density * sum_volume - mean_of_volume_list * nInternalid + target_density * mean_of_volume_list
-        # l_i = l_i_part / std_of_volume_list
 
         scale_lambda = 1.0
         h_first = k_0 * kappa_i / std_of_energy_list / np.sqrt(nInternalid) / 3.0
-        # h_second = 2.0 * cost_lambda * l_i * density_increment * volume / std_of_volume_list
-        # h[index] = h_first + h_second
         h[index] = h_first
         first_index_list.append(h_first)
-        # second_index_list.append(h_second)
 
         energy_part_elem_dict[eid] = h[index]
 
         for j_index in range(index + 1, nInternalid):
             list_key = list(optimize_elem_dict.keys())
             volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
-            # J[(index,j_index)] = 2.0 * cost_lambda * density_increment * density_increment * volume * volume_j / std_of_volume_list / std_of_volume_list
-            # J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / np.sqrt(bunsan)
             J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / pow(std_of_volume_list, 2) / nInternalid / 9.0
-            # print(J[(index,j_index)])
-
-    # print("energy_part_elem_dict")
-    # print(energy_part_elem_dict)
-    # print("second_index_list\n")
-    # print(second_index_list)
-
-    # plt.figure()
-    # plt.plot(first_index_list, marker='o')
-    # plt.xlabel('Index')
-    # plt.ylabel('First Value')
-    # plt.title('First Value Data Plot')
-    # temp_first_image_path = "first_image.png"
-    # plt.savefig(temp_first_image_path)
-    # plt.close()
-    # img = Image(temp_first_image_path)
-    # new_sheet.add_image(img, 'A25')
-
-    # plt.figure()
-    # plt.plot(second_index_list, marker='o')
-    # plt.xlabel('Index')
-    # plt.ylabel('second Value')
-    # plt.title('second Value Data Plot')
-    # temp_second_image_path = "seccond_image.png"
-    # plt.savefig(temp_second_image_path)
-    # plt.close()
-    # img = Image(temp_second_image_path)
-    # new_sheet.add_image(img, 'K25')
-
-    # energy_part_values = list(energy_part_elem_dict.values())
-    # mean_value = np.mean(energy_part_values)
-    # median_value = np.median(energy_part_values)
-    # max_value = np.amax(energy_part_values)
-    # cost_scale = max_value
-    # logging.info(f"energy_part_valuesの平均値：{mean_value}")
-    # logging.info(f"energy_part_valuesの中央値：{median_value}")
-    # logging.info(f"energy_part_valuesの最大値：{max_value}")
 
     ising_index_dict = {}
     bUseOptimization = True
@@ -575,6 +471,7 @@ def main2(file_path, phase):
     data = np.zeros((div_y, div_x))
     # data2 = np.zeros((div_y, div_x))
 
+    sum_volume = 0.0
     for index, value in enumerate(merged_elem_list):
         eid = index + 1
         sheet.cell(row=row_start + index + 1, column=col_start, value=eid)
@@ -590,12 +487,7 @@ def main2(file_path, phase):
                 dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
             ising_index = ising_index_eid_map[eid]
             ising_value = ising_index_dict[ising_index] if bUseOptimization else ising_index_dict[index]
-            # ising_value = ising_index_dict[ising_index]
             dens_value = dens_value_old + density_increment * ising_value
-            # if dens_value >= (1.0 - decide_val_threshold - threshold):
-            #     dens_value = 1.0
-            # if dens_value <= (decide_val_threshold + threshold):
-            #     dens_value = 0.00001
 
         sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
 
@@ -604,14 +496,7 @@ def main2(file_path, phase):
 
         mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngs_modulus
 
-        # center_x = next((elem['center_x'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
-        # center_y = next((elem['center_y'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
-        # cell_width = next((elem['width_x'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
-        # cell_height = next((elem['width_y'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
-        # cell_x = int(center_x // cell_width)
-        # cell_y = int(center_y // cell_height)
-        # data[cell_y, cell_x] = dens_value
-        # data2[cell_y, cell_x] = energy_part
+        sum_volume += value['volume'] * dens_value
 
         range_polygon = next((elem['polygon'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
         block_width, block_height = width / div_x, height / div_y
@@ -625,6 +510,8 @@ def main2(file_path, phase):
                 block_right_top = Point((i + 1) * block_width, (j + 1) * block_height)
                 if range_polygon.contains(block_right_top):
                     data[j, i] = dens_value
+
+    sheet.cell(row=row_start - 1, column=col_start + 1, value=float(sum_volume))
 
     plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=1.1)
     plt.colorbar()
@@ -775,7 +662,7 @@ def main2(file_path, phase):
     return True
 
 if __name__ == '__main__':
-    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\cantilever_different_volume_1.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
+    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\upper_push_bridge.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
     if len(sys.argv) < 3:
         print("Usage: python merged_cae_test.py <liml_file_path> <excel_file_path>")
     else:
