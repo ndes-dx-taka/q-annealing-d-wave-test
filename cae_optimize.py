@@ -23,20 +23,20 @@ import win32gui
 from xml.etree import ElementTree as ET
 
 initial_condition_data = {
-    "width": 140,
+    "width": 70,
     "height": 40,
     "target_density": 0.5,
     "density_increment": 0.1,
     "density_power": 2.0,
     "initial_youngs_modulus": 2.0e+5,
-    "initial_volume": 5600.0,
+    "initial_volume": 2800.0,
     "cost_lambda": 5,
     "cost_lambda_n": 100,
-    "loop_num": 8,
+    "loop_num": 12,
     "decide_val_threshold": 0.1,
     "start_phase_num": 1,
     "alwaysUpdateExcel" : 1,  # 1の時にupdateする
-    "devide_num_x" : 1400,
+    "devide_num_x" : 700,
     "devide_num_y" : 400
 }
 
@@ -294,8 +294,8 @@ def main2(file_path, phase):
     density_zero_elem_list = []
     x_start = 0.0
     y_start = 0.0
-    x_length = 70.0
-    y_length = 40.0
+    x_length = initial_condition_data["width"]
+    y_length = initial_condition_data["height"]
     edge_ratio_x = 40
     edge_ratio_y = 20
     x_upper = x_start + x_length - x_length / edge_ratio_x
@@ -332,7 +332,7 @@ def main2(file_path, phase):
         if b_need_optimize == True:
             optimize_elem_dict[eid] = elem
 
-    if len(optimize_elem_dict) == 0:
+    if len(optimize_elem_dict) <= 10:
         logging.info("\n\n")
         logging.info("最適化が完了したため処理を終了します")
         return True
@@ -639,10 +639,10 @@ def main2(file_path, phase):
         win32gui.SetForegroundWindow(hwnd)
     pyautogui.moveTo(158, 70, duration=1)
     pyautogui.click()
-    time.sleep(25)
+    time.sleep(30)
     pyautogui.moveTo(1886, 4)
     pyautogui.click()
-    time.sleep(3)
+    time.sleep(5)
     pyautogui.moveTo(867, 594)
     pyautogui.click()
 
@@ -662,7 +662,7 @@ def main2(file_path, phase):
     return True
 
 if __name__ == '__main__':
-    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\upper_push_bridge.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
+    sys.argv = ["cae_optimize.py", "C:\\work\\github\\q-annealing-d-wave-test\\cantilever_different_volume_triangle.liml", "C:\\work\\github\\q-annealing-d-wave-test\\result_summary.xlsx"]
     if len(sys.argv) < 3:
         print("Usage: python merged_cae_test.py <liml_file_path> <excel_file_path>")
     else:
