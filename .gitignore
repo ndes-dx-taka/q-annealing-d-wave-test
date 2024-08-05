@@ -6,3 +6,9 @@
 /testdate_lisa/*
 /upper_push_bridge/*
 /upper_push_bridge_triangle/*
+/temp/*
+/cae_opti_info.log
+/*.dat
+/*.f06
+/*.liml
+/*.xlsx
