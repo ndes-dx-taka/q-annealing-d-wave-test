@@ -8,6 +8,7 @@ import math
 import numpy as np
 import openpyxl
 from openpyxl.drawing.image import Image
+from openpyxl.styles import PatternFill
 import os
 import pandas as pd
 import re
@@ -27,10 +28,10 @@ initial_condition_data = {
     "density_power": 2.0,
     "initial_youngs_modulus": 2.0e+5,
     "cost_lambda": 5,
-    "loop_num": 1,
+    "loop_num": 4,
     "decide_val_threshold": 0.1,
-    "start_phase_num": 1,
-    "alwaysUpdateExcel" : 1,  # 1の時にupdateする
+    "start_phase_num": 4,
+    "alwaysUpdateExcel" : 0,  # 1の時にupdateする
     "divide_num" : 20
 }
 
@@ -203,6 +204,13 @@ def extract_stress_values(filename):
 
     return stress_data
 
+def check_skip_optimize(youngmodulus, initial_youngmodulus, threshold, phase_num):
+    if phase_num == 1:
+        return False
+    if abs(youngmodulus - initial_youngmodulus) < threshold:
+        return True
+    return False
+
 def main():
     loop_num = initial_condition_data['loop_num']
     start_phase_num = initial_condition_data['start_phase_num'] - 1
@@ -289,17 +297,21 @@ def main2(file_path, phase):
             if line.startswith('MAT1'):
                 mat_id = int(line[8:16].strip())
                 youngmodulus = float(line[16:24].strip())
-                poissonratio = float(line[32:40].strip())
-                value = [youngmodulus, poissonratio]
-                mat1_dict[mat_id] = value
+                if check_skip_optimize(youngmodulus, initial_youngs_modulus, threshold, phase_num):
+                    del pshell_dict[mat_id]
+                else:
+                    poissonratio = float(line[32:40].strip())
+                    value = [youngmodulus, poissonratio]
+                    mat1_dict[mat_id] = value
             if line.startswith('CQUAD4'):
                 elem_id = int(line[8:16].strip())
-                x1 = int(line[24:32].strip())
-                x2 = int(line[32:40].strip())
-                x3 = int(line[40:48].strip())
-                x4 = int(line[48:56].strip())
-                value = [x1, x2, x3, x4]
-                cquad4_dict[elem_id] = value
+                if elem_id in pshell_dict:
+                    x1 = int(line[24:32].strip())
+                    x2 = int(line[32:40].strip())
+                    x3 = int(line[40:48].strip())
+                    x4 = int(line[48:56].strip())
+                    value = [x1, x2, x3, x4]
+                    cquad4_dict[elem_id] = value
 
     input_f06_file_name = "{}_phase_{}.f06".format(str(sys.argv[2])[:-4], phase_num - 1)
     if phase_num == 1:
@@ -343,7 +355,7 @@ def main2(file_path, phase):
 
         merged_elem_list.append(merged_dict)
 
-    print(merged_elem_list)
+    # print(merged_elem_list)
     
     end_time_1 = time.time()
     elapsed_time_1 = end_time_1 - start_time_1
@@ -351,24 +363,24 @@ def main2(file_path, phase):
     sheet.cell(row=row_start, column=col_start + 1, value=f"{str(elapsed_time_1)}")
     row_start += 1
 
-    optimize_elem_dict = {}
-    density_zero_elem_list = []
-    for index, elem in enumerate(merged_elem_list):
-        b_need_optimize = True
-        eid = elem.get('eid', 0)
-        if b_need_optimize == True and phase_num > 1:
-            row_start_check_finish = 20
-            dens_value_old = float(sheet.cell(row=row_start_check_finish + index + 1, column=col_start - 2).value)
-            if dens_value_old >= (1.0 - decide_val_threshold - threshold):
-                b_need_optimize = False
-            if dens_value_old <= (decide_val_threshold + threshold):
-                b_need_optimize = False
-                density_zero_elem_list.append(int(eid))
+    # optimize_elem_dict = {}
+    # density_zero_elem_list = []
+    # for index, elem in enumerate(merged_elem_list):
+    #     b_need_optimize = True
+    #     eid = elem.get('eid', 0)
+    #     if b_need_optimize == True and phase_num > 1:
+    #         row_start_check_finish = 20
+    #         dens_value_old = float(sheet.cell(row=row_start_check_finish + index + 1, column=col_start - 2).value)
+    #         if dens_value_old >= (1.0 - decide_val_threshold - threshold):
+    #             b_need_optimize = False
+    #         if dens_value_old <= (decide_val_threshold + threshold):
+    #             b_need_optimize = False
+    #             density_zero_elem_list.append(int(eid))
                 
-        if b_need_optimize == True:
-            optimize_elem_dict[int(eid)] = elem
+    #     if b_need_optimize == True:
+    #         optimize_elem_dict[int(eid)] = elem
 
-    if len(optimize_elem_dict) <= 10:
+    if len(merged_elem_list) <= 10:
         logging.info("\n\n")
         logging.info("最適化が完了したため処理を終了します")
         return True
@@ -381,11 +393,11 @@ def main2(file_path, phase):
     first_density = target_density
     energy_part_elem_dict = {}
     ising_index_eid_map = {}
-    nInternalid = len(optimize_elem_dict)
+    nInternalid = len(merged_elem_list)
     h = defaultdict(int)
     J = defaultdict(int)
-    for index, (key, elem) in enumerate(optimize_elem_dict.items()):
-        eid = int(key)
+    for index, elem in enumerate(merged_elem_list):
+        eid = int(elem.get('eid', 0))
         stressxx = elem.get('stressxx', 0)
         stressyy = elem.get('stressyy', 0)
         stressxy = elem.get('stressxy', 0)
@@ -419,8 +431,8 @@ def main2(file_path, phase):
 
     std_of_volume_list = np.std(volume_list_for_scale)
 
-    for index, (key, elem) in enumerate(optimize_elem_dict.items()):
-        eid = int(key)
+    for index, elem in enumerate(merged_elem_list):
+        eid = int(elem.get('eid', 0))
         stressxx = elem.get('stressxx', 0)
         stressyy = elem.get('stressyy', 0)
         stressxy = elem.get('stressxy', 0)
@@ -450,8 +462,9 @@ def main2(file_path, phase):
         energy_part_elem_dict[eid] = h[index]
 
         for j_index in range(index + 1, nInternalid):
-            list_key = list(optimize_elem_dict.keys())
-            volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
+            # list_key = list(optimize_elem_dict.keys())
+            # volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
+            volume_j = merged_elem_list[j_index].get('volume', 0)
             J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / pow(std_of_volume_list, 2) / nInternalid / 9.0
 
     ising_index_dict = {}
@@ -485,32 +498,52 @@ def main2(file_path, phase):
     height = initial_condition_data["height"]
     div_x = width * initial_condition_data["divide_num"]
     div_y = height * initial_condition_data["divide_num"]
-    data = np.zeros((div_y, div_x))
+    # data = np.zeros((div_y, div_x))
+    data = np.full((div_y, div_x), np.nan)
+    # cmap = plt.cm.viridis.copy()
+    # cmap.set_bad(color='white')  # NaNを白色で表示
+    # for i in range(div_y):
+    #     for j in range(div_x):
+    #         data[i, j] = np.nan
+
+    zero_fix_density_index_list = []
 
     sum_volume = 0.0
     for index, value in enumerate(merged_elem_list):
         eid = index + 1
         sheet.cell(row=row_start + index + 1, column=col_start, value=eid)
-        dens_value = 0
-        if int(eid) not in optimize_elem_dict:
-            if int(eid) in density_zero_elem_list:
-                dens_value = 1.0e-9
-            else:
-                dens_value = 1.0
-        else:
-            dens_value_old = first_density
-            if not phase_num == 1:
-                dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
-            ising_index = ising_index_eid_map[eid]
-            ising_value = ising_index_dict[ising_index]
-            dens_value = dens_value_old + density_increment * ising_value
+        # dens_value = 0
+        # if int(eid) not in optimize_elem_dict:
+        #     if int(eid) in density_zero_elem_list:
+        #         dens_value = 1.0e-9
+        #     else:
+        #         dens_value = 1.0
+        # else:
+        dens_value_old = first_density
+        if not phase_num == 1:
+            dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
+        ising_index = ising_index_eid_map[eid]
+        ising_value = ising_index_dict[ising_index]
+        dens_value = dens_value_old + density_increment * ising_value
 
-        sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
+        dens_cell = sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
 
         energy_part = energy_part_elem_dict.get(eid, 0)
         sheet.cell(row=row_start + index + 1, column=col_start + 2, value=float(energy_part))
 
-        mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngs_modulus
+        b_use_youngmodulus = True
+        if dens_value >= (1.0 - decide_val_threshold - threshold):
+            fill_red = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+            dens_cell.fill = fill_red
+            dens_value = 1.0
+        if dens_value <= (decide_val_threshold + threshold):
+            zero_fix_density_index_list.append(int(eid))
+            fill_blue = PatternFill(start_color="CCCCFF", end_color="CCCCFF", fill_type="solid")
+            dens_cell.fill = fill_blue
+            b_use_youngmodulus = False
+
+        if b_use_youngmodulus == True:
+            mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngs_modulus
 
         sum_volume += value['volume'] * dens_value
 
@@ -527,9 +560,10 @@ def main2(file_path, phase):
                 if range_polygon.contains(block_right_top):
                     data[j, i] = dens_value
 
-    sheet.cell(row=row_start - 1, column=col_start + 1, value=float(sum_volume))
+    sheet.cell(row=row_start - 1, column=col_start + 1, value="Sum volume is ->")
+    sheet.cell(row=row_start - 1, column=col_start + 2, value=float(sum_volume))
 
-    plt.imshow(data, cmap='gray_r', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=1.1)
+    plt.imshow(data, cmap='viridis', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=1.0)
     plt.colorbar()
     plt.title("Density distribution of elements")
     plt.xlabel("x")
@@ -560,22 +594,36 @@ def main2(file_path, phase):
     lines = get_file_content(input_dat_file_name)
 
     new_dat_file_name = increment_phase_number(input_dat_file_name)
+    same_pshell_flag = 0
     with open(new_dat_file_name, 'w', encoding='utf-8') as file:
         for line in lines:
+            if line.startswith('PSHELL'):
+                elem_id = int(line[8:16].strip())
+                if elem_id in zero_fix_density_index_list:
+                    line = f"${line}"
+                    same_pshell_flag = 1
             if line.startswith('MAT1'):
-                line_strip = line.strip()
-                mat_id = int(line[8:16].strip())
-                youngmodulus_value = mat_youngmodulus.get(str(mat_id), None)
-                if youngmodulus_value is None:
-                    print(f"internal error of youngmodulus_value id({mat_id})")
-                youngmodulus_formatted = format_float(youngmodulus_value)
-                line = (
-                    format_field_left('MAT1', 8) +
-                    format_field_right(mat_id, 8) +
-                    format_field_right(youngmodulus_formatted, 8) +
-                    line_strip[24:] +
-                    '\n'
-                )
+                if same_pshell_flag == 1:
+                    same_pshell_flag = 2
+                    line = f"${line}"
+                else:
+                    line_strip = line.strip()
+                    mat_id = int(line[8:16].strip())
+                    youngmodulus_value = mat_youngmodulus.get(str(mat_id), None)
+                    if youngmodulus_value is None:
+                        print(f"internal error of youngmodulus_value id({mat_id})")
+                    youngmodulus_formatted = format_float(youngmodulus_value)
+                    line = (
+                        format_field_left('MAT1', 8) +
+                        format_field_right(mat_id, 8) +
+                        format_field_right(youngmodulus_formatted, 8) +
+                        line_strip[24:] +
+                        '\n'
+                    )
+            if line.startswith('CQUAD4') and same_pshell_flag == 2:
+                same_pshell_flag = 0
+                line = f"${line}"
+
             file.write(line)
 
     logging.info(f"最適化後のdatファイル名：{new_dat_file_name}")
