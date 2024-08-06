@@ -211,6 +211,28 @@ def check_skip_optimize(youngmodulus, initial_youngmodulus, threshold, phase_num
         return True
     return False
 
+def rename_file(original_file_path, new_file_path):
+    try:
+        os.rename(original_file_path, new_file_path)
+        print(f"ファイルが {original_file_path} から {new_file_path} にリネームされました。")
+    except FileNotFoundError:
+        print(f"ファイル {original_file_path} が見つかりません。")
+    except PermissionError:
+        print(f"ファイル {original_file_path} に対するアクセスが拒否されました。")
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")
+
+def delete_file(file_path):
+    try:
+        os.remove(file_path)
+        print(f"ファイル {file_path} が削除されました。")
+    except FileNotFoundError:
+        print(f"ファイル {file_path} が見つかりません。")
+    except PermissionError:
+        print(f"ファイル {file_path} に対するアクセスが拒否されました。")
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")
+
 def main():
     loop_num = initial_condition_data['loop_num']
     start_phase_num = initial_condition_data['start_phase_num'] - 1
@@ -277,6 +299,7 @@ def main2(file_path, phase):
     pshell_dict = {}
     mat1_dict = {}
     cquad4_dict = {}
+    all_node_id_set = set()
     with open(input_dat_file_name, 'r', encoding='utf-8') as file:
         for line in file:
             # コメント行をスキップ
@@ -289,6 +312,7 @@ def main2(file_path, phase):
                 y = float(line[32:40].strip())
                 z = float(line[40:48].strip())
                 node_dict[grid_id] = [x, y, z]
+                all_node_id_set.add(grid_id)
             if line.startswith('PSHELL'):
                 elem_id = int(line[8:16].strip())
                 mat_id = int(line[16:24].strip())
@@ -362,23 +386,6 @@ def main2(file_path, phase):
     sheet.cell(row=row_start, column=col_start, value="Read Input Data")
     sheet.cell(row=row_start, column=col_start + 1, value=f"{str(elapsed_time_1)}")
     row_start += 1
-
-    # optimize_elem_dict = {}
-    # density_zero_elem_list = []
-    # for index, elem in enumerate(merged_elem_list):
-    #     b_need_optimize = True
-    #     eid = elem.get('eid', 0)
-    #     if b_need_optimize == True and phase_num > 1:
-    #         row_start_check_finish = 20
-    #         dens_value_old = float(sheet.cell(row=row_start_check_finish + index + 1, column=col_start - 2).value)
-    #         if dens_value_old >= (1.0 - decide_val_threshold - threshold):
-    #             b_need_optimize = False
-    #         if dens_value_old <= (decide_val_threshold + threshold):
-    #             b_need_optimize = False
-    #             density_zero_elem_list.append(int(eid))
-                
-    #     if b_need_optimize == True:
-    #         optimize_elem_dict[int(eid)] = elem
 
     if len(merged_elem_list) <= 10:
         logging.info("\n\n")
@@ -498,13 +505,7 @@ def main2(file_path, phase):
     height = initial_condition_data["height"]
     div_x = width * initial_condition_data["divide_num"]
     div_y = height * initial_condition_data["divide_num"]
-    # data = np.zeros((div_y, div_x))
     data = np.full((div_y, div_x), np.nan)
-    # cmap = plt.cm.viridis.copy()
-    # cmap.set_bad(color='white')  # NaNを白色で表示
-    # for i in range(div_y):
-    #     for j in range(div_x):
-    #         data[i, j] = np.nan
 
     zero_fix_density_index_list = []
 
@@ -512,13 +513,6 @@ def main2(file_path, phase):
     for index, value in enumerate(merged_elem_list):
         eid = index + 1
         sheet.cell(row=row_start + index + 1, column=col_start, value=eid)
-        # dens_value = 0
-        # if int(eid) not in optimize_elem_dict:
-        #     if int(eid) in density_zero_elem_list:
-        #         dens_value = 1.0e-9
-        #     else:
-        #         dens_value = 1.0
-        # else:
         dens_value_old = first_density
         if not phase_num == 1:
             dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
@@ -594,8 +588,10 @@ def main2(file_path, phase):
     lines = get_file_content(input_dat_file_name)
 
     new_dat_file_name = increment_phase_number(input_dat_file_name)
+    new_dat_temp_file_name = new_dat_file_name + ".tmp"
     same_pshell_flag = 0
-    with open(new_dat_file_name, 'w', encoding='utf-8') as file:
+    used_node_id_set = set()
+    with open(new_dat_temp_file_name, 'w', encoding='utf-8') as file:
         for line in lines:
             if line.startswith('PSHELL'):
                 elem_id = int(line[8:16].strip())
@@ -620,11 +616,42 @@ def main2(file_path, phase):
                         line_strip[24:] +
                         '\n'
                     )
-            if line.startswith('CQUAD4') and same_pshell_flag == 2:
-                same_pshell_flag = 0
-                line = f"${line}"
+            if line.startswith('CQUAD4'):
+                if same_pshell_flag == 2:
+                    same_pshell_flag = 0
+                    line = f"${line}"
+                else:
+                    x1 = int(line[24:32].strip())
+                    x2 = int(line[32:40].strip())
+                    x3 = int(line[40:48].strip())
+                    x4 = int(line[48:56].strip())
+                    used_node_id_set.add(x1)
+                    used_node_id_set.add(x2)
+                    used_node_id_set.add(x3)
+                    used_node_id_set.add(x4)
 
             file.write(line)
+
+    lines_new = get_file_content(new_dat_temp_file_name)
+        
+    unused_node_set = all_node_id_set - used_node_id_set
+    if unused_node_set:
+        with open(new_dat_file_name, 'w', encoding='utf-8') as file:
+            for line in lines_new:
+                if line.startswith('SPC1'):
+                    fix_node = int(line[24:32].strip())
+                    if fix_node in unused_node_set:
+                        line = f"${line}"
+                if line.startswith('GRID'):
+                    grid_node = int(line[8:16].strip())
+                    if grid_node in unused_node_set:
+                        line = f"${line}"
+                file.write(line)
+        b_erase_temp_file = False
+        if b_erase_temp_file:
+            delete_file(new_dat_temp_file_name)
+    else:
+        rename_file(new_dat_temp_file_name, new_dat_file_name)
 
     logging.info(f"最適化後のdatファイル名：{new_dat_file_name}")
 
