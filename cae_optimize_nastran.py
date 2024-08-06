@@ -1,39 +1,17 @@
 from collections import defaultdict
-from dwave.system.samplers import DWaveSampler
-from dwave.system.composites import EmbeddingComposite
+# from dwave.system.samplers import DWaveSampler
+# from dwave.system.composites import EmbeddingComposite
 from dwave.system import LeapHybridSampler
 import logging
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 # import math
 import numpy as np
-# import openpyxl
-# from openpyxl.drawing.image import Image
-# from openpyxl.styles import PatternFill
 import os
-import pandas as pd
+# import pandas as pd
 import re
-# from shapely.geometry import Point, Polygon
-# import statistics
-# import subprocess
 import sys
 import shutil
 import time
-# from xml.etree import ElementTree as ET
-
-initial_condition_data = {
-    # "width": 70,
-    # "height": 40,
-    "target_density": 0.5,
-    "density_increment": 0.1,
-    "density_power": 2.0,
-    "initial_youngs_modulus": 2.0e+5,
-    "cost_lambda": 5,
-    "loop_num": 5,
-    "decide_val_threshold": 0.1,
-    "start_phase_num": 5
-    # "alwaysUpdateExcel" : 0,  # 1の時にupdateする
-    # "divide_num" : 20
-}
 
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -42,13 +20,38 @@ logging.basicConfig(level=logging.INFO,
                         logging.StreamHandler()
                     ])
 
-# def check_input_excel(sheet):
-#     start_row = 20
-#     for row in range(start_row + 1, sheet.max_row + 1):
-#         a_value = sheet.cell(row=row, column=1).value
-#         if str(a_value) != str(row - start_row):
-#             return False
-#     return True
+class OptimizeManager:
+    def __init__(self, initial_condition_data_dict=None, mat_data_dict=None):
+        if initial_condition_data_dict is None:
+            print("Please set initial_condition_data_dict")
+            initial_condition_data_dict = {}
+        if mat_data_dict is None:
+            mat_data_dict = {}
+        self._initial_condition_data_dict = initial_condition_data_dict
+        self._mat_data_dict = mat_data_dict
+    
+    def get_from_initial_condition_data_dict(self, key):
+        return self._initial_condition_data_dict.get(key, None)
+    
+    def add_to_mat_data_dict(self, key, value):
+        self._mat_data_dict[key] = value
+
+    def get_from_mat_data_dict(self, key):
+        return self._mat_data_dict.get(key, None)
+    
+initial_condition_data = {
+    "target_density": 0.5,
+    "density_increment": 0.1,
+    "density_power": 2.0,
+    "initial_youngs_modulus": 2.0e+5,
+    "cost_lambda": 5,
+    "loop_num": 11,
+    "decide_val_threshold": 0.1,
+    "start_phase_num": 11,
+    "threshold": 0.001,
+}
+
+om = OptimizeManager(initial_condition_data)
 
 def calculate_quadrilateral_area(vertices):
     x_coords = [vertex['x'] for vertex in vertices]
@@ -67,25 +70,6 @@ def increment_phase_number(filename):
     else:
         print("dat file name is maybe wrong. (increment_phase_number)")
     return new_filename
-
-# def renew_excel():
-#     # ファイルのパスを定義
-#     original_file = sys.argv[3]
-#     backup_file = "C:\\work\\github\\q-annealing-d-wave-test\\result_summary_bak.xlsx"
-
-#     # 元のファイルを削除
-#     if os.path.exists(original_file):
-#         os.remove(original_file)
-#         print(f"{original_file} を削除しました。")
-#     else:
-#         print(f"{original_file} は存在しません。")
-
-#     # バックアップファイルをコピーして新しい名前で保存
-#     if os.path.exists(backup_file):
-#         shutil.copy(backup_file, original_file)
-#         print(f"{backup_file} を {original_file} としてコピーしました。")
-#     else:
-#         print(f"{backup_file} は存在しません。")
 
 def get_file_content(file_path):
     encodings = ['utf-8', 'shift_jis', 'iso-8859-1', 'latin1']
@@ -112,10 +96,9 @@ def format_field_right(value, length=8):
     return f'{value:>{length}}'
 
 def format_float(value):
-    """
-    floatの有効数字を4桁以内に丸めて、指数表記で文字列を返す関数。
-    """
-    return "{:.1E}".format(value)
+    formatted_value = "{:.4E}".format(value)
+    parts = formatted_value.split('E')
+    return f"{parts[0]}E{int(parts[1])}"
 
 def process_nastran_file_fixed_length(input_file_path, output_file_path):
     cquad4_cards = []
@@ -239,59 +222,28 @@ def calculate_density(E_i, E_0, n):
     return (E_i / E_0) ** (1 / n)
 
 def main():
-    loop_num = initial_condition_data['loop_num']
-    start_phase_num = initial_condition_data['start_phase_num'] - 1
-    # bAlwaysUpdateExcel = False
-    # bAlwaysUpdateExcelval = initial_condition_data['alwaysUpdateExcel']
-    # if str(bAlwaysUpdateExcelval) == "1":
-    #     bAlwaysUpdateExcel = True
-    # if loop_num <= start_phase_num or bAlwaysUpdateExcel:
-    #     renew_excel()
-    # for i in range(loop_num):
+    loop_num = om.get_from_initial_condition_data_dict('loop_num')
+    start_phase_num = om.get_from_initial_condition_data_dict('start_phase_num') - 1
     for i in range(start_phase_num, loop_num):
         phase_num = i + 1
         result = main2(phase_num)
-        if result == False:
+        if result == -1:
             logging.error(f"{phase_num}/{loop_num}の処理で失敗しました")
+        if result == 1:
+            logging.info(f"{phase_num}/{loop_num}で、最適化を完了しました")
 
 def main2(phase_num):
     dat_file_path = sys.argv[1]
     f06_file_path = sys.argv[2]
     start_time_1 = time.time()
-    # workbook = openpyxl.load_workbook(sys.argv[3])
-    # sheet = workbook["Sheet1"]
 
-    target_density = initial_condition_data["target_density"]
-    density_increment = initial_condition_data["density_increment"]
-    density_power = initial_condition_data["density_power"]
-    initial_youngs_modulus = initial_condition_data["initial_youngs_modulus"]
-    # initial_volume = initial_condition_data["width"] * initial_condition_data["height"]
-    cost_lambda = initial_condition_data["cost_lambda"]
-    # loop_num = initial_condition_data["loop_num"]
-    decide_val_threshold = initial_condition_data["decide_val_threshold"]
-
-    threshold = 0.001
-
-    # sheet.cell(row=5, column=1, value=f"{str(target_density)}")
-    # sheet.cell(row=5, column=2, value=f"{str(density_increment)}")
-    # sheet.cell(row=5, column=3, value=f"{str(density_power)}")
-    # sheet.cell(row=5, column=4, value=f"{str(initial_youngs_modulus)}")
-    # sheet.cell(row=5, column=5, value=f"{str(initial_volume)}")
-    # sheet.cell(row=5, column=6, value=f"{str(cost_lambda)}")
-    # sheet.cell(row=5, column=8, value=f"{str(loop_num)}")
-    # sheet.cell(row=5, column=9, value=f"{str(decide_val_threshold)}")
-
-    # phase_num = phase + 1
-    # row_start = 13
-    # col_start = 3 * phase_num - 2
-
-    # if int(phase) != phase_num - 1:
-    #     logging.error(f"現在のフェーズ数{phase}が、エクセルに記載のあるフェーズ数{phase_num - 1}と一致しません")
-    #     return False
-
-    # if check_input_excel(sheet) == False:
-    #     print("Input excel data is invalid")
-    #     return False
+    target_density = om.get_from_initial_condition_data_dict('target_density')
+    density_increment = om.get_from_initial_condition_data_dict('density_increment')
+    density_power = om.get_from_initial_condition_data_dict('density_power')
+    initial_youngs_modulus = om.get_from_initial_condition_data_dict('initial_youngs_modulus')
+    cost_lambda = om.get_from_initial_condition_data_dict('cost_lambda')
+    decide_val_threshold = om.get_from_initial_condition_data_dict('decide_val_threshold')
+    threshold = om.get_from_initial_condition_data_dict('threshold')
 
     input_dat_file_name = "{}_phase_{}.dat".format(str(dat_file_path)[:-4], phase_num - 1)
     if phase_num == 1:
@@ -306,7 +258,6 @@ def main2(phase_num):
     all_node_id_set = set()
     with open(input_dat_file_name, 'r', encoding='utf-8') as file:
         for line in file:
-            # コメント行をスキップ
             if line.startswith('$'):
                 continue
             if line.startswith('GRID'):
@@ -390,10 +341,6 @@ def main2(phase_num):
     # sheet.cell(row=row_start, column=col_start, value="Read Input Data")
     # sheet.cell(row=row_start, column=col_start + 1, value=f"{str(elapsed_time_1)}")
     # row_start += 1
-
-    if len(merged_elem_list) <= 10:
-        logging.info("最適化が完了したため処理を終了します")
-        return True
             
     start_time_2 = time.time()
 
@@ -515,7 +462,11 @@ def main2(phase_num):
 
     zero_fix_density_index_list = []
 
-    sum_volume = 0.0
+    b_fin_optimize = 0
+    if len(merged_elem_list) <= (2800 / 100):
+        logging.info(f"最適化が完了していない要素の数が{(2800 / 100)}以下になったため、要素の0/1を決定します")
+        b_fin_optimize = 1
+    
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
         youngsmodulus = float(elem.get('youngsmodulus', 0))
@@ -532,8 +483,13 @@ def main2(phase_num):
         # dens_cell = sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
 
         # energy_part = energy_part_elem_dict.get(eid, 0)
-        # sheet.cell(row=row_start + index + 1, column=col_start + 2, value=float(energy_part))
-
+        # sheet.cell(row=row_start + index + 1, column=col_start + 2, value=float(energy_part))   
+        if b_fin_optimize:
+            if dens_value >= (0.5 + threshold):
+               dens_value = 1.0
+            else:
+               dens_value = 0.0
+                         
         b_use_youngmodulus = True
         if dens_value >= (1.0 - decide_val_threshold - threshold):
             # fill_red = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
@@ -677,7 +633,7 @@ def main2(phase_num):
 
     logging.info(f"success optimization on phase {phase_num}")
 
-    return True
+    return b_fin_optimize
 
 if __name__ == '__main__':
     logging.info("\n\n")
