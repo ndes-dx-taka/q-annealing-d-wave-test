@@ -3,14 +3,13 @@ from collections import defaultdict
 # from dwave.system.composites import EmbeddingComposite
 from dwave.system import LeapHybridSampler
 import logging
-# import matplotlib.pyplot as plt
-# import math
 import numpy as np
 import os
 # import pandas as pd
 import re
 import sys
 import shutil
+import subprocess
 import time
 
 logging.basicConfig(level=logging.INFO, 
@@ -21,37 +20,57 @@ logging.basicConfig(level=logging.INFO,
                     ])
 
 class OptimizeManager:
-    def __init__(self, initial_condition_data_dict=None, mat_data_dict=None):
+    def __init__(self, initial_condition_data_dict=None, youngsmodulus_data_dict=None):
         if initial_condition_data_dict is None:
             print("Please set initial_condition_data_dict")
             initial_condition_data_dict = {}
-        if mat_data_dict is None:
-            mat_data_dict = {}
+        if youngsmodulus_data_dict is None:
+            youngsmodulus_data_dict = {}
         self._initial_condition_data_dict = initial_condition_data_dict
-        self._mat_data_dict = mat_data_dict
+        self._youngsmodulus_data_dict = youngsmodulus_data_dict
     
     def get_from_initial_condition_data_dict(self, key):
         return self._initial_condition_data_dict.get(key, None)
     
-    def add_to_mat_data_dict(self, key, value):
-        self._mat_data_dict[key] = value
+    def add_to_youngsmodulus_data_dict(self, key, value):
+        self._youngsmodulus_data_dict[key] = value
 
-    def get_from_mat_data_dict(self, key):
-        return self._mat_data_dict.get(key, None)
+    def get_from_youngsmodulus_data_dict(self, key):
+        return self._youngsmodulus_data_dict.get(key, None)
     
 initial_condition_data = {
     "target_density": 0.5,
     "density_increment": 0.1,
     "density_power": 2.0,
-    "initial_youngs_modulus": 2.0e+5,
+    # "initial_youngs_modulus": 2.0e+5,
     "cost_lambda": 5,
-    "loop_num": 11,
+    "loop_num": 1,
     "decide_val_threshold": 0.1,
-    "start_phase_num": 11,
+    "start_phase_num": 1,
     "threshold": 0.001,
+    "finish_elem_num": 0,
+    "nastran_exe_path" : "xxx",
 }
 
 om = OptimizeManager(initial_condition_data)
+
+def calculate_area(vertices):
+    if len(vertices) == 3:
+        area = calculate_triangular_area(vertices)
+    if len(vertices) == 4:
+        area = calculate_quadrilateral_area(vertices)
+    return area
+
+def calculate_triangular_area(vertices):
+    x1, y1 = vertices[0]['x'], vertices[0]['y']
+    x2, y2 = vertices[1]['x'], vertices[1]['y']
+    x3, y3 = vertices[2]['x'], vertices[2]['y']
+    a = x2 - x1
+    b = y2 - y1
+    c = x3 - x1
+    d = y3 - y1
+    area = 0.5 * abs(a * d - b * c)
+    return area
 
 def calculate_quadrilateral_area(vertices):
     x_coords = [vertex['x'] for vertex in vertices]
@@ -80,7 +99,7 @@ def get_file_content(file_path):
             with open(file_path, 'r', encoding=encoding) as file:
                 content = file.readlines()
             print(f"File successfully read with encoding: {encoding}")
-            break  # 成功した場合、ループを抜ける
+            break
         except UnicodeDecodeError:
             print(f"Failed to read file with encoding: {encoding}")
             continue
@@ -101,50 +120,75 @@ def format_float(value):
     return f"{parts[0]}E{int(parts[1])}"
 
 def process_nastran_file_fixed_length(input_file_path, output_file_path):
-    cquad4_cards = []
-    pshell_card = None
-    mat1_card = None
+    cquad4_ctria3_cards_dict = {}
+    pshell_card_dict = {}
+    mat1_card_dict = {}
+    cquad4_ctria3_pshell_id_dict = {}
+    pshell_mat1_id_dict = {}
+    elem_type_dict = {}  # CQUAD4: 0,  CTRIA3: 1
 
     content = get_file_content(input_file_path)
 
     for line in content:
-        if line.startswith('CQUAD4'):
-            cquad4_cards.append(line.strip())
+        if line.startswith('CQUAD4') or line.startswith('CTRIA3'):
+            cquad4_ctria3_id = int(line[8:16].strip())
+            pshell_id = int(line[16:24].strip())
+            cquad4_ctria3_cards_dict[cquad4_ctria3_id] = line.strip()
+            cquad4_ctria3_pshell_id_dict[cquad4_ctria3_id] = pshell_id
+            if line.startswith('CQUAD4'):
+                elem_type_dict[cquad4_ctria3_id] = int(0)
+            if line.startswith('CTRIA3'):
+                elem_type_dict[cquad4_ctria3_id] = int(1)
         elif line.startswith('PSHELL'):
-            pshell_card = line.strip()
+            pshell_id = int(line[8:16].strip())
+            mat_id = int(line[16:24].strip())
+            pshell_mat1_id_dict[pshell_id] = mat_id
+            pshell_card_dict[pshell_id] = line.strip()
         elif line.startswith('MAT1'):
-            mat1_card = line.strip()
+            mat_id = int(line[8:16].strip())
+            mat1_card_dict[mat_id] = line.strip()
 
     new_content = []
-    card_index = 1
 
-    for cquad4 in cquad4_cards:
+    for cquad4_ctria3_id, cquad4_ctria3_card in cquad4_ctria3_cards_dict.items():
+        pshell_id = cquad4_ctria3_pshell_id_dict[cquad4_ctria3_id]
+        mat_id = pshell_mat1_id_dict[pshell_id]
+        pshell_card = pshell_card_dict[pshell_id]
+        mat1_card = mat1_card_dict[mat_id]
         new_pshell = (
             format_field_left('PSHELL', 8) +
-            format_field_right(card_index, 8) +
-            format_field_right(card_index, 8) +
+            format_field_right(cquad4_ctria3_id, 8) +
+            format_field_right(cquad4_ctria3_id, 8) +
             pshell_card[24:]
         )
         new_mat1 = (
             format_field_left('MAT1', 8) +
-            format_field_right(card_index, 8) +
+            format_field_right(cquad4_ctria3_id, 8) +
             mat1_card[16:]
         )
-        new_cquad4 = (
-            format_field_left('CQUAD4', 8) +
-            format_field_right(card_index, 8) +
-            format_field_right(card_index, 8) +
-            cquad4[24:]
+        elem_type_id = elem_type_dict[cquad4_ctria3_id]
+        elem_type_str = None
+        if elem_type_id == 0:
+            elem_type_str = 'CQUAD4'
+        if elem_type_id == 1:
+            elem_type_str = 'CTRIA3'
+        new_cquad4_ctria3 = (
+            format_field_left(elem_type_str, 8) +
+            format_field_right(cquad4_ctria3_id, 8) +
+            format_field_right(cquad4_ctria3_id, 8) +
+            cquad4_ctria3_card[24:]
         )
 
         new_content.append(new_pshell)
         new_content.append(new_mat1)
-        new_content.append(new_cquad4)
-        card_index += 1
+        new_content.append(new_cquad4_ctria3)
+
+        youngsmodulus = float(mat1_card[16:24].strip())
+        om.add_to_youngsmodulus_data_dict(cquad4_ctria3_id, youngsmodulus)
 
     with open(output_file_path, 'w', encoding='utf-8') as file:
         for line in content:
-            if not line.startswith(('CQUAD4', 'PSHELL', 'MAT1', 'ENDDATA')):
+            if not line.startswith(('CQUAD4', 'CTRIA3', 'PSHELL', 'MAT1', 'ENDDATA')):
                 file.write(line)
         for line in new_content:
             file.write(line + '\n')
@@ -160,11 +204,13 @@ def extract_stress_values(filename):
         line = lines[i]
         next_line = lines[i + 1]
 
-        if re.search(r'S T R E S S E S\s+I N\s+Q U A D R I L A T E R A L\s+E L E M E N T S\s+\( Q U A D 4 \)', line):
+        if (re.search(r'S T R E S S E S\s+I N\s+Q U A D R I L A T E R A L\s+E L E M E N T S\s+\( Q U A D 4 \)', line) or
+            re.search(r'S T R E S S E S\s+I N\s+T R I A N G U L A R\s+E L E M E N T S\s+\( T R I A 3 \)', line)):
             start_reading = True
             continue
         
-        if re.search(r'MSC NASTRAN.+PAGE.+', line):
+        # if re.search(r'MSC NASTRAN.+PAGE.+', line):
+        if re.search(r'.+MSC.NASTRAN.+PAGE.+', line):
             start_reading = False
         
         # if start_reading and re.match(r'^\s*\d+\s+', line):
@@ -179,11 +225,11 @@ def extract_stress_values(filename):
             normal_y2 = float(next_line[44:58].strip())
             shear_xy2 = float(next_line[59:73].strip())
 
-            normal_x_avg = (normal_x1 + normal_x2) / 2
-            normal_y_avg = (normal_y1 + normal_y2) / 2
-            shear_xy_avg = (shear_xy1 + shear_xy2) / 2
+            stress_part_1 = (pow(normal_x1, 2.0) + pow(normal_y1, 2.0) + pow(normal_x2, 2.0) + pow(normal_y2, 2.0)) / 2.0
+            stress_part_2 = normal_x1 * normal_y1 + normal_x2 * normal_y2
+            stress_part_3 = shear_xy1 + shear_xy2
 
-            stress_data[element_id] = (normal_x_avg, normal_y_avg, shear_xy_avg)
+            stress_data[element_id] = (stress_part_1, stress_part_2, stress_part_3)
 
     return stress_data
 
@@ -224,6 +270,11 @@ def calculate_density(E_i, E_0, n):
 def main():
     loop_num = om.get_from_initial_condition_data_dict('loop_num')
     start_phase_num = om.get_from_initial_condition_data_dict('start_phase_num') - 1
+
+    # ### テスト用
+    # for index in range(1, 2801):
+    #     om.add_to_youngsmodulus_data_dict(int(index), 2.0e+5)
+
     for i in range(start_phase_num, loop_num):
         phase_num = i + 1
         result = main2(phase_num)
@@ -240,7 +291,7 @@ def main2(phase_num):
     target_density = om.get_from_initial_condition_data_dict('target_density')
     density_increment = om.get_from_initial_condition_data_dict('density_increment')
     density_power = om.get_from_initial_condition_data_dict('density_power')
-    initial_youngs_modulus = om.get_from_initial_condition_data_dict('initial_youngs_modulus')
+    # initial_youngs_modulus = om.get_from_initial_condition_data_dict('initial_youngs_modulus')
     cost_lambda = om.get_from_initial_condition_data_dict('cost_lambda')
     decide_val_threshold = om.get_from_initial_condition_data_dict('decide_val_threshold')
     threshold = om.get_from_initial_condition_data_dict('threshold')
@@ -254,7 +305,7 @@ def main2(phase_num):
     node_dict = {}
     pshell_dict = {}
     mat1_dict = {}
-    cquad4_dict = {}
+    cquad4_ctria3_dict = {}
     all_node_id_set = set()
     with open(input_dat_file_name, 'r', encoding='utf-8') as file:
         for line in file:
@@ -276,21 +327,27 @@ def main2(phase_num):
             if line.startswith('MAT1'):
                 mat_id = int(line[8:16].strip())
                 youngmodulus = float(line[16:24].strip())
-                if check_skip_optimize(youngmodulus, initial_youngs_modulus, threshold, phase_num):
+                initial_youngsmodulus = om.get_from_youngsmodulus_data_dict(mat_id)
+                if check_skip_optimize(youngmodulus, initial_youngsmodulus, threshold, phase_num):
                     del pshell_dict[mat_id]
                 else:
                     poissonratio = float(line[32:40].strip())
                     value = [youngmodulus, poissonratio]
                     mat1_dict[mat_id] = value
-            if line.startswith('CQUAD4'):
+            if line.startswith('CQUAD4') or line.startswith('CTRIA3'):
+            # if line.startswith('CQUAD4'):
                 elem_id = int(line[8:16].strip())
                 if elem_id in pshell_dict:
+                    value = None
                     x1 = int(line[24:32].strip())
                     x2 = int(line[32:40].strip())
                     x3 = int(line[40:48].strip())
-                    x4 = int(line[48:56].strip())
-                    value = [x1, x2, x3, x4]
-                    cquad4_dict[elem_id] = value
+                    if line.startswith('CQUAD4'):
+                        x4 = int(line[48:56].strip())
+                        value = [x1, x2, x3, x4]
+                    if line.startswith('CTRIA3'):
+                        value = [x1, x2, x3]
+                    cquad4_ctria3_dict[elem_id] = value
 
     input_f06_file_name = "{}_phase_{}.f06".format(str(f06_file_path)[:-4], phase_num - 1)
     if phase_num == 1:
@@ -302,21 +359,21 @@ def main2(phase_num):
         eid = pshell_key
         merged_dict = {}
         merged_dict['eid'] = eid
-        cquad4_value = cquad4_dict[eid]
-        merged_dict['nodes'] = cquad4_value
+        cquad4_ctria3_value = cquad4_ctria3_dict[eid]
+        merged_dict['nodes'] = cquad4_ctria3_value
         mat1_value = mat1_dict[value[0]]
         thickness = value[1]
         merged_dict['thickness'] = thickness
         merged_dict['youngsmodulus'] = mat1_value[0]
         merged_dict['poissonratio'] = mat1_value[1]
         stress_value = stress_dict[eid]
-        merged_dict['stressxx'] = stress_value[0]
-        merged_dict['stressyy'] = stress_value[1]
-        merged_dict['stressxy'] = stress_value[2]
+        merged_dict['stress_part_1'] = stress_value[0]
+        merged_dict['stress_part_2'] = stress_value[1]
+        merged_dict['stress_part_3'] = stress_value[2]
 
         node_data = []
         # points = []
-        for nid in cquad4_value:
+        for nid in cquad4_ctria3_value:
             node_value = node_dict[nid]
             node_value_dict = {}
             node_value_dict['nid'] = nid
@@ -324,40 +381,34 @@ def main2(phase_num):
             node_value_dict['y'] = node_value[1]
             node_value_dict['z'] = node_value[2]
             node_data.append(node_value_dict)
-            # points.append((node_value[0], node_value[1]))
         merged_dict['node_data'] = node_data
-        area = calculate_quadrilateral_area(node_data)
+        area = calculate_area(node_data)
         merged_dict['area'] = area
-        # polygon = Polygon(points)
-        # merged_dict['polygon'] = polygon
         merged_dict['volume'] = area * thickness
 
         merged_elem_list.append(merged_dict)
-
-    # print(merged_elem_list)
     
     elapsed_time_1 = time.time() - start_time_1
     logging.info(f"入力データの読み込みにかかった時間：{str(elapsed_time_1)}")
-    # sheet.cell(row=row_start, column=col_start, value="Read Input Data")
-    # sheet.cell(row=row_start, column=col_start + 1, value=f"{str(elapsed_time_1)}")
-    # row_start += 1
-            
+
     start_time_2 = time.time()
 
     energy_list_for_scale = []
     volume_list_for_scale = []
 
     first_density = target_density
-    # energy_part_elem_dict = {}
     ising_index_eid_map = {}
     nInternalid = len(merged_elem_list)
     h = defaultdict(int)
     J = defaultdict(int)
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
-        stressxx = elem.get('stressxx', 0)
-        stressyy = elem.get('stressyy', 0)
-        stressxy = elem.get('stressxy', 0)
+        # stressxx = elem.get('stressxx', 0)
+        # stressyy = elem.get('stressyy', 0)
+        # stressxy = elem.get('stressxy', 0)
+        stress_part_1 = elem.get('stress_part_1', 0)
+        stress_part_2 = elem.get('stress_part_2', 0)
+        stress_part_3 = elem.get('stress_part_3', 0)
         poissonratio = float(elem.get('poissonratio', 0))
         youngsmodulus = float(elem.get('youngsmodulus', 0))
         volume = float(elem.get('volume', 0))
@@ -365,12 +416,11 @@ def main2(phase_num):
         ising_index_eid_map[eid] = index
 
         density_now = 0
+        initial_youngsmodulus = om.get_from_youngsmodulus_data_dict(eid)
         if phase_num == 1:
             density_now = first_density
         else:
-            # eid_row = eid + 20
-            # density_now = sheet.cell(row=eid_row, column=col_start - 2).value
-            density_now = calculate_density(youngsmodulus, initial_youngs_modulus, density_power)
+            density_now = calculate_density(youngsmodulus, initial_youngsmodulus, density_power)
 
         density_plus_delta = density_now + density_increment
         density_minus_delta = density_now - density_increment
@@ -378,7 +428,8 @@ def main2(phase_num):
         alpha_value = pow(density_plus_delta, (1 - density_power))
         beta_value = pow(density_minus_delta, (1 - density_power))
 
-        kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
+        # kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngsmodulus
+        kappa_i = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) * volume / initial_youngsmodulus
         
         energy_list_for_scale.append(alpha_value * kappa_i)
         energy_list_for_scale.append(beta_value * kappa_i)
@@ -391,9 +442,12 @@ def main2(phase_num):
 
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
-        stressxx = elem.get('stressxx', 0)
-        stressyy = elem.get('stressyy', 0)
-        stressxy = elem.get('stressxy', 0)
+        # stressxx = elem.get('stressxx', 0)
+        # stressyy = elem.get('stressyy', 0)
+        # stressxy = elem.get('stressxy', 0)
+        stress_part_1 = elem.get('stress_part_1', 0)
+        stress_part_2 = elem.get('stress_part_2', 0)
+        stress_part_3 = elem.get('stress_part_3', 0)
         poissonratio = float(elem.get('poissonratio', 0))
         youngsmodulus = float(elem.get('youngsmodulus', 0))
         volume = float(elem.get('volume', 0))
@@ -401,12 +455,11 @@ def main2(phase_num):
         ising_index_eid_map[eid] = index
 
         density_now = 0
+        initial_youngsmodulus = om.get_from_youngsmodulus_data_dict(eid)
         if phase_num == 1:
             density_now = first_density
         else:
-            # eid_row = eid + 20
-            # density_now = sheet.cell(row=eid_row, column=col_start - 2).value
-            density_now = calculate_density(youngsmodulus, initial_youngs_modulus, density_power)
+            density_now = calculate_density(youngsmodulus, initial_youngsmodulus, density_power)
 
         density_plus_delta = density_now + density_increment
         density_minus_delta = density_now - density_increment
@@ -414,16 +467,13 @@ def main2(phase_num):
         alpha_value = pow(density_plus_delta, (1 - density_power))
         beta_value = pow(density_minus_delta, (1 - density_power))
         k_0 = (alpha_value - beta_value) / 2.0
-        kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngs_modulus
+        # kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngsmodulus
+        kappa_i = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) * volume / initial_youngsmodulus
 
         h_first = k_0 * kappa_i / std_of_energy_list / np.sqrt(nInternalid) / 3.0
         h[index] = h_first
 
-        # energy_part_elem_dict[eid] = h[index]
-
         for j_index in range(index + 1, nInternalid):
-            # list_key = list(optimize_elem_dict.keys())
-            # volume_j = optimize_elem_dict[list_key[j_index]].get('volume', 0)
             volume_j = merged_elem_list[j_index].get('volume', 0)
             J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / pow(std_of_volume_list, 2) / nInternalid / 9.0
 
@@ -442,48 +492,25 @@ def main2(phase_num):
         for elem in S_plus_1:
             ising_index_dict[elem] = 1
 
-        # for key, value in ising_index_dict.items():
-        #     print(f"キー：{key}, バリュー：{value}")
-        # print(f"イジングモデルの各要素の最適化後の値は: {ising_index_dict} となる")
-
-    # start_time_3 = time.time()
     mat_youngmodulus = {}
-    # row_start = 19
-    # sheet.cell(row=row_start, column=col_start, value=f"phase_{phase_num}")
-    # row_start += 1
-    # sheet.cell(row=row_start, column=col_start, value="Element number")
-    # sheet.cell(row=row_start, column=col_start + 1, value="Density")
-    # sheet.cell(row=row_start, column=col_start + 2, value="Energy part")
-    # width = initial_condition_data["width"]
-    # height = initial_condition_data["height"]
-    # div_x = width * initial_condition_data["divide_num"]
-    # div_y = height * initial_condition_data["divide_num"]
-    # data = np.full((div_y, div_x), np.nan)
-
     zero_fix_density_index_list = []
-
     b_fin_optimize = 0
-    if len(merged_elem_list) <= (2800 / 100):
-        logging.info(f"最適化が完了していない要素の数が{(2800 / 100)}以下になったため、要素の0/1を決定します")
+    finish_elem_num = om.get_from_initial_condition_data_dict('finish_elem_num')
+    if len(merged_elem_list) <= finish_elem_num:
+        logging.info(f"最適化が完了していない要素の数が{finish_elem_num}以下になったため、要素の0/1を決定します")
         b_fin_optimize = 1
     
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
         youngsmodulus = float(elem.get('youngsmodulus', 0))
-        # eid = index + 1
-        # sheet.cell(row=row_start + index + 1, column=col_start, value=eid)
         dens_value_old = first_density
+        initial_youngsmodulus = om.get_from_youngsmodulus_data_dict(eid)
         if not phase_num == 1:
-            dens_value_old = calculate_density(youngsmodulus, initial_youngs_modulus, density_power)
-            # dens_value_old = float(sheet.cell(row=row_start + index + 1, column=col_start - 2).value)
+            dens_value_old = calculate_density(youngsmodulus, initial_youngsmodulus, density_power)
         ising_index = ising_index_eid_map[eid]
         ising_value = ising_index_dict[ising_index]
         dens_value = dens_value_old + density_increment * ising_value
 
-        # dens_cell = sheet.cell(row=row_start + index + 1, column=col_start + 1, value=float(dens_value))
-
-        # energy_part = energy_part_elem_dict.get(eid, 0)
-        # sheet.cell(row=row_start + index + 1, column=col_start + 2, value=float(energy_part))   
         if b_fin_optimize:
             if dens_value >= (0.5 + threshold):
                dens_value = 1.0
@@ -492,63 +519,13 @@ def main2(phase_num):
                          
         b_use_youngmodulus = True
         if dens_value >= (1.0 - decide_val_threshold - threshold):
-            # fill_red = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
-            # dens_cell.fill = fill_red
             dens_value = 1.0
         if dens_value <= (decide_val_threshold + threshold):
             zero_fix_density_index_list.append(int(eid))
-            # fill_blue = PatternFill(start_color="CCCCFF", end_color="CCCCFF", fill_type="solid")
-            # dens_cell.fill = fill_blue
             b_use_youngmodulus = False
 
         if b_use_youngmodulus == True:
-            mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngs_modulus
-
-        # sum_volume += value['volume'] * dens_value
-
-        # range_polygon = next((elem['polygon'] for elem in merged_elem_list if str(elem['eid']) == str(eid)), None)
-        # block_width, block_height = width / div_x, height / div_y
-        # min_x, min_y, max_x, max_y = range_polygon.bounds
-        # start_x = max(int(min_x // block_width), 0)
-        # end_x = min(int(np.ceil(max_x / block_width)), div_x)
-        # start_y = max(int(min_y // block_height), 0)
-        # end_y = min(int(np.ceil(max_y / block_height)), div_y)
-        # for i in range(start_x, end_x):
-        #     for j in range(start_y, end_y):
-        #         block_right_top = Point((i + 1) * block_width, (j + 1) * block_height)
-        #         if range_polygon.contains(block_right_top):
-        #             data[j, i] = dens_value
-
-    # sheet.cell(row=row_start - 1, column=col_start + 1, value="Sum volume is ->")
-    # sheet.cell(row=row_start - 1, column=col_start + 2, value=float(sum_volume))
-
-    # plt.imshow(data, cmap='viridis', origin='lower', extent=[0, width, 0, height], vmin=0, vmax=1.0)
-    # plt.colorbar()
-    # plt.title("Density distribution of elements")
-    # plt.xlabel("x")
-    # plt.ylabel("y")
-    # temp_image_path = "optimize_cae_density_temp.png"
-    # plt.savefig(temp_image_path)
-    # plt.close()
-
-    # new_sheet_name = "Image on phase " + str(phase_num)
-    # new_sheet = workbook.create_sheet(new_sheet_name)
-
-    # new_sheet['A1'] = '要素の密度分布'
-    # img = Image(temp_image_path)
-    # new_sheet.add_image(img, 'A3')
-
-    # phase_num += 1
-    # sheet.cell(row=10, column=1, value=phase_num)
-
-    # row_start = 15
-    # end_time_3 = time.time()
-    # elapsed_time_3 = end_time_3 - start_time_3
-    # sheet.cell(row=row_start, column=col_start, value="Update excel file")
-    # sheet.cell(row=row_start, column=col_start + 1, value=f"{str(elapsed_time_3)}")
-    # row_start += 1
-
-    start_time_4 = time.time()
+            mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngsmodulus
 
     lines = get_file_content(input_dat_file_name)
 
@@ -582,7 +559,8 @@ def main2(phase_num):
                             line_strip[24:] +
                             '\n'
                         )
-            if line.startswith('CQUAD4'):
+            # if line.startswith('CQUAD4'):
+            if line.startswith('CQUAD4') or line.startswith('CTRIA3'):
                 if same_pshell_flag == 2:
                     same_pshell_flag = 0
                     line = f"${line}"
@@ -590,11 +568,12 @@ def main2(phase_num):
                     x1 = int(line[24:32].strip())
                     x2 = int(line[32:40].strip())
                     x3 = int(line[40:48].strip())
-                    x4 = int(line[48:56].strip())
                     used_node_id_set.add(x1)
                     used_node_id_set.add(x2)
                     used_node_id_set.add(x3)
-                    used_node_id_set.add(x4)
+                    if line.startswith('CQUAD4'):
+                        x4 = int(line[48:56].strip())
+                        used_node_id_set.add(x4)
 
             file.write(line)
 
@@ -622,14 +601,14 @@ def main2(phase_num):
     logging.info(f"最適化後のdatファイル名：{new_dat_file_name}")
 
     ### nastran実行
-
-    # end_time_4 = time.time()
-    # elapsed_time_4 = end_time_4 - start_time_4
-    # sheet.cell(row=row_start, column=col_start, value="Put LISA file and do FEM solver")
-    # sheet.cell(row=row_start, column=col_start + 1, value=f"{str(elapsed_time_4)}")
-
-    # workbook.save(sys.argv[3])
-    # os.remove(temp_image_path)
+    # try:
+    #     nastran_exe_path = om.get_from_initial_condition_data_dict('nastran_exe_path')
+    #     result = subprocess.run([nastran_exe_path, new_dat_file_name], check=True)
+    #     logging.info(f"Nastran execution finished with return code: {result.returncode}")
+    #     print(f"Nastran execution finished with return code: {result.returncode}")
+    # except subprocess.CalledProcessError as e:
+    #     logging.error(f"Nastran execution failed: {e}")
+    #     print(f"Nastran execution failed: {e}")
 
     logging.info(f"success optimization on phase {phase_num}")
 
@@ -639,7 +618,7 @@ if __name__ == '__main__':
     logging.info("\n\n")
     if len(sys.argv) <= 2:
         logging.info("Usage: python cae_optimize_nastran.py <dat_file_path> <f06_file_path>")
-        sys.argv = ["cae_optimize_nastran.py", "C:\\work\\github\\q-annealing-d-wave-test\\test.dat", "C:\\work\\github\\q-annealing-d-wave-test\\test.f06"]
+        sys.argv = ["cae_optimize_nastran.py", "C:\\work\\github\\q-annealing-d-wave-test\\check1.dat", "C:\\work\\github\\q-annealing-d-wave-test\\check1.f06"]
     logging.info("最適化を開始します")
     logging.info(f"引数: {sys.argv}")
     main()
