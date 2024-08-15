@@ -1,3 +1,10 @@
+# [b_Use_proxy, b_is_set_sys_argv_on_program, b_erase_temp_file, b_do_nastran]
+# 開発ネットワークでの連続実行では下記。
+# [True, False, True, True]
+# nastranがない場合のデバッグ時は下記
+# [False, True, False, False]
+flag_data_list = [True, False, True, True]
+
 from collections import defaultdict
 # from dwave.system.samplers import DWaveSampler
 # from dwave.system.composites import EmbeddingComposite
@@ -11,26 +18,33 @@ import sys
 import shutil
 import subprocess
 import time
+import csv
 
-logging.basicConfig(level=logging.INFO, 
+def setup_logging(logfilepath):
+    logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[
-                        logging.FileHandler("C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_info.log"),
-                        logging.StreamHandler()
+                        logging.FileHandler(logfilepath)
+                        # logging.StreamHandler()
                     ])
 
+def format_float(value):
+    formatted_value = "{:.4E}".format(value)
+    parts = formatted_value.split('E')
+    return f"{parts[0]}E{int(parts[1])}"
+
 class OptimizeManager:
-    def __init__(self, initial_condition_data_dict=None, youngsmodulus_data_dict=None):
-        if initial_condition_data_dict is None:
+    def __init__(self, flag_data_list=None, youngsmodulus_data_dict=None):
+        if flag_data_list is None:
             print("Please set initial_condition_data_dict")
-            initial_condition_data_dict = {}
+            flag_data_list = []
         if youngsmodulus_data_dict is None:
             youngsmodulus_data_dict = {}
-        self._initial_condition_data_dict = initial_condition_data_dict
+        self._flag_data_list = flag_data_list
         self._youngsmodulus_data_dict = youngsmodulus_data_dict
     
-    def get_from_initial_condition_data_dict(self, key):
-        return self._initial_condition_data_dict.get(key, None)
+    def get_from_flag_data_list(self, index):
+        return self._flag_data_list[index]
     
     def add_to_youngsmodulus_data_dict(self, key, value):
         self._youngsmodulus_data_dict[key] = value
@@ -38,21 +52,50 @@ class OptimizeManager:
     def get_from_youngsmodulus_data_dict(self, key):
         return self._youngsmodulus_data_dict.get(key, None)
     
-initial_condition_data = {
-    "target_density": 0.5,
-    "density_increment": 0.1,
-    "density_power": 2.0,
-    # "initial_youngs_modulus": 2.0e+5,
-    "cost_lambda": 5,
-    "loop_num": 1,
-    "decide_val_threshold": 0.1,
-    "start_phase_num": 1,
-    "threshold": 0.001,
-    "finish_elem_num": 0,
-    "nastran_exe_path" : "xxx",
-}
+    def write_youngsmodulus_data_to_csv(self, csvpath):
+        with open(csvpath, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
 
-om = OptimizeManager(initial_condition_data)
+            for key, value in self._youngsmodulus_data_dict.items():
+                value_format = format_float(value)
+                writer.writerow([key, str(value_format)])
+
+    def load_youngsmodulus_data_from_csv(self, csvpath):
+        if len(self._youngsmodulus_data_dict) == 0:
+            with open(csvpath, 'r') as csvfile:
+                reader = csv.reader(csvfile)
+
+                for row in reader:
+                    if len(row) == 2:
+                        key, value = row
+                        self._youngsmodulus_data_dict[int(key)] = float(value)
+            print(f"Data loaded from {csvpath} into _youngsmodulus_data_dict.")
+        else:
+            print("_youngsmodulus_data_dict is not empty, skipping load.")
+
+om = OptimizeManager(flag_data_list)
+
+def rename_file(original_file_path, new_file_path):
+    try:
+        os.rename(original_file_path, new_file_path)
+        print(f"ファイルが {original_file_path} から {new_file_path} にリネームされました。")
+    except FileNotFoundError:
+        print(f"ファイル {original_file_path} が見つかりません。")
+    except PermissionError:
+        print(f"ファイル {original_file_path} に対するアクセスが拒否されました。")
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")
+
+def delete_file(file_path):
+    try:
+        os.remove(file_path)
+        print(f"ファイル {file_path} が削除されました。")
+    except FileNotFoundError:
+        print(f"ファイル {file_path} が見つかりません。")
+    except PermissionError:
+        print(f"ファイル {file_path} に対するアクセスが拒否されました。")
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")
 
 def calculate_area(vertices):
     if len(vertices) == 3:
@@ -114,10 +157,56 @@ def format_field_left(value, length=8):
 def format_field_right(value, length=8):
     return f'{value:>{length}}'
 
-def format_float(value):
-    formatted_value = "{:.4E}".format(value)
-    parts = formatted_value.split('E')
-    return f"{parts[0]}E{int(parts[1])}"
+def safe_int_conv(sub_value):
+    if sub_value:
+        return int(sub_value)
+    else:
+        return ""
+
+def safe_float_conv(sub_value):
+    if sub_value:
+        return float(sub_value)
+    else:
+        return ""
+    
+def group_elements_for_csv(elements):
+    elements = sorted(elements)
+    grouped_elements = []
+    start = elements[0]
+    end = elements[0]
+
+    for i in range(1, len(elements)):
+        if elements[i] == end + 1:
+            end = elements[i]
+        else:
+            if start == end:
+                grouped_elements.append(f"{start}")
+            else:
+                grouped_elements.append(f"{start}-{end}")
+            start = elements[i]
+            end = elements[i]
+    
+    if start == end:
+        grouped_elements.append(f"{start}")
+    else:
+        grouped_elements.append(f"{start}-{end}")
+
+    return " ".join(grouped_elements)
+
+def rename_old_filename(original_file_name):
+    if not os.path.exists(original_file_name):
+        return
+
+    base_name, extension = os.path.splitext(original_file_name)
+    index = 1
+    old_filename = original_file_name
+
+    while os.path.exists(old_filename):
+        old_filename = f"{base_name}_old_{index}{extension}"
+        index += 1
+
+    rename_file(original_file_name, old_filename)
+    return
 
 def process_nastran_file_fixed_length(input_file_path, output_file_path):
     cquad4_ctria3_cards_dict = {}
@@ -126,6 +215,9 @@ def process_nastran_file_fixed_length(input_file_path, output_file_path):
     cquad4_ctria3_pshell_id_dict = {}
     pshell_mat1_id_dict = {}
     elem_type_dict = {}  # CQUAD4: 0,  CTRIA3: 1
+    cquad4_ctria3_id_youngmodulus_dict = {}
+
+    base_name, ext = os.path.splitext(input_file_path)
 
     content = get_file_content(input_file_path)
 
@@ -166,6 +258,7 @@ def process_nastran_file_fixed_length(input_file_path, output_file_path):
             format_field_right(cquad4_ctria3_id, 8) +
             mat1_card[16:]
         )
+        cquad4_ctria3_id_youngmodulus_dict
         elem_type_id = elem_type_dict[cquad4_ctria3_id]
         elem_type_str = None
         if elem_type_id == 0:
@@ -186,6 +279,11 @@ def process_nastran_file_fixed_length(input_file_path, output_file_path):
         youngsmodulus = float(mat1_card[16:24].strip())
         om.add_to_youngsmodulus_data_dict(cquad4_ctria3_id, youngsmodulus)
 
+    reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
+    rename_old_filename(reserve_data_csv)
+    om.write_youngsmodulus_data_to_csv(reserve_data_csv)
+
+    rename_old_filename(output_file_path)
     with open(output_file_path, 'w', encoding='utf-8') as file:
         for line in content:
             if not line.startswith(('CQUAD4', 'CTRIA3', 'PSHELL', 'MAT1', 'ENDDATA')):
@@ -193,6 +291,64 @@ def process_nastran_file_fixed_length(input_file_path, output_file_path):
         for line in new_content:
             file.write(line + '\n')
         file.write("ENDDATA\n")
+
+    pshell_cquad4_ctria3_id_dict = {}
+    mat1_cquad4_ctria3_id_dict = {}
+    for cquad4_ctria3_id, pshell_id in cquad4_ctria3_pshell_id_dict.items():
+        if pshell_id in pshell_cquad4_ctria3_id_dict:
+            pshell_cquad4_ctria3_id_dict[pshell_id].append(cquad4_ctria3_id)
+            mat_id = pshell_mat1_id_dict[pshell_id]
+            if mat_id in mat1_cquad4_ctria3_id_dict:
+                mat1_cquad4_ctria3_id_dict[mat_id].append(cquad4_ctria3_id)
+            else:
+                new_list = []
+                new_list.append(cquad4_ctria3_id)
+                mat1_cquad4_ctria3_id_dict[pshell_id] = new_list
+        else:
+            new_list = []
+            new_list.append(cquad4_ctria3_id)
+            pshell_cquad4_ctria3_id_dict[pshell_id] = new_list
+            mat_id = pshell_mat1_id_dict[pshell_id]
+            if mat_id in mat1_cquad4_ctria3_id_dict:
+                mat1_cquad4_ctria3_id_dict[mat_id].append(cquad4_ctria3_id)
+            else:
+                new_list = []
+                new_list.append(cquad4_ctria3_id)
+                mat1_cquad4_ctria3_id_dict[pshell_id] = new_list
+
+    output_csv = base_name + '.csv'
+    rename_old_filename(output_csv)
+    with open(output_csv, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['PSHELL information'])
+        for key, value in pshell_card_dict.items():
+            writer.writerow([key,
+                             safe_int_conv(value[16:24].strip()),
+                             safe_float_conv(value[24:32].strip()),
+                             safe_int_conv(value[32:40].strip())]
+                             )
+        writer.writerow([])
+        writer.writerow(['MAT information'])
+        for key, value in mat1_card_dict.items():
+            writer.writerow([key,
+                             safe_float_conv(value[16:24].strip()),
+                             safe_float_conv(value[24:32].strip()),
+                             safe_float_conv(value[32:40].strip()),
+                             safe_float_conv(value[40:48].strip()),
+                             safe_float_conv(value[48:56].strip()),
+                             safe_float_conv(value[56:64].strip())]
+                             )
+        writer.writerow([])
+        writer.writerow(['Elements number corresponding to PSHELL'])
+        for pshell_id, elements in pshell_cquad4_ctria3_id_dict.items():
+            grouped_elements = 'group : ' + group_elements_for_csv(elements)
+            writer.writerow([pshell_id, grouped_elements])
+        writer.writerow([])
+        writer.writerow(['Elements number corresponding to MAT1'])
+        for mat1_id, elements in mat1_cquad4_ctria3_id_dict.items():
+            grouped_elements = 'group : ' + group_elements_for_csv(elements)
+            writer.writerow([mat1_id, grouped_elements])
+        
 
 def extract_stress_values(filename):
     lines = get_file_content(filename)
@@ -240,40 +396,19 @@ def check_skip_optimize(youngmodulus, initial_youngmodulus, threshold, phase_num
         return True
     return False
 
-def rename_file(original_file_path, new_file_path):
-    try:
-        os.rename(original_file_path, new_file_path)
-        print(f"ファイルが {original_file_path} から {new_file_path} にリネームされました。")
-    except FileNotFoundError:
-        print(f"ファイル {original_file_path} が見つかりません。")
-    except PermissionError:
-        print(f"ファイル {original_file_path} に対するアクセスが拒否されました。")
-    except Exception as e:
-        print(f"エラーが発生しました: {e}")
-
-def delete_file(file_path):
-    try:
-        os.remove(file_path)
-        print(f"ファイル {file_path} が削除されました。")
-    except FileNotFoundError:
-        print(f"ファイル {file_path} が見つかりません。")
-    except PermissionError:
-        print(f"ファイル {file_path} に対するアクセスが拒否されました。")
-    except Exception as e:
-        print(f"エラーが発生しました: {e}")
-
 def calculate_density(E_i, E_0, n):
     if E_0 == 0:
         raise ValueError("E_0 must be non-zero.")
     return (E_i / E_0) ** (1 / n)
 
 def main():
-    loop_num = om.get_from_initial_condition_data_dict('loop_num')
-    start_phase_num = om.get_from_initial_condition_data_dict('start_phase_num') - 1
+    loop_num = int(sys.argv[9])
+    start_phase_num = int(sys.argv[10]) - 1
 
-    # ### テスト用
-    # for index in range(1, 2801):
-    #     om.add_to_youngsmodulus_data_dict(int(index), 2.0e+5)
+    if start_phase_num >= 1:
+        base_name, ext = os.path.splitext(sys.argv[1])
+        reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
+        om.load_youngsmodulus_data_from_csv(reserve_data_csv)
 
     for i in range(start_phase_num, loop_num):
         phase_num = i + 1
@@ -288,13 +423,12 @@ def main2(phase_num):
     f06_file_path = sys.argv[2]
     start_time_1 = time.time()
 
-    target_density = om.get_from_initial_condition_data_dict('target_density')
-    density_increment = om.get_from_initial_condition_data_dict('density_increment')
-    density_power = om.get_from_initial_condition_data_dict('density_power')
-    # initial_youngs_modulus = om.get_from_initial_condition_data_dict('initial_youngs_modulus')
-    cost_lambda = om.get_from_initial_condition_data_dict('cost_lambda')
-    decide_val_threshold = om.get_from_initial_condition_data_dict('decide_val_threshold')
-    threshold = om.get_from_initial_condition_data_dict('threshold')
+    target_density = float(sys.argv[5])
+    density_increment = float(sys.argv[6])
+    density_power = float(sys.argv[7])
+    cost_lambda = float(sys.argv[8])
+    decide_val_threshold = float(sys.argv[11])
+    threshold = float(sys.argv[12])
 
     input_dat_file_name = "{}_phase_{}.dat".format(str(dat_file_path)[:-4], phase_num - 1)
     if phase_num == 1:
@@ -372,7 +506,6 @@ def main2(phase_num):
         merged_dict['stress_part_3'] = stress_value[2]
 
         node_data = []
-        # points = []
         for nid in cquad4_ctria3_value:
             node_value = node_dict[nid]
             node_value_dict = {}
@@ -403,9 +536,6 @@ def main2(phase_num):
     J = defaultdict(int)
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
-        # stressxx = elem.get('stressxx', 0)
-        # stressyy = elem.get('stressyy', 0)
-        # stressxy = elem.get('stressxy', 0)
         stress_part_1 = elem.get('stress_part_1', 0)
         stress_part_2 = elem.get('stress_part_2', 0)
         stress_part_3 = elem.get('stress_part_3', 0)
@@ -442,9 +572,6 @@ def main2(phase_num):
 
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
-        # stressxx = elem.get('stressxx', 0)
-        # stressyy = elem.get('stressyy', 0)
-        # stressxy = elem.get('stressxy', 0)
         stress_part_1 = elem.get('stress_part_1', 0)
         stress_part_2 = elem.get('stress_part_2', 0)
         stress_part_3 = elem.get('stress_part_3', 0)
@@ -479,6 +606,14 @@ def main2(phase_num):
 
     ising_index_dict = {}
 
+    b_Use_proxy = om.get_from_flag_data_list(0)
+    if b_Use_proxy:
+        proxy_url = sys.argv[14]
+        username = sys.argv[15]
+        password = sys.argv[16]
+        os.environ['HTTP_PROXY'] = f"http://{username}:{password}@{proxy_url}"
+        os.environ['HTTPS_PROXY'] = f"http://{username}:{password}@{proxy_url}"
+
     sampler = LeapHybridSampler()
     response = sampler.sample_ising(h, J)
 
@@ -495,7 +630,7 @@ def main2(phase_num):
     mat_youngmodulus = {}
     zero_fix_density_index_list = []
     b_fin_optimize = 0
-    finish_elem_num = om.get_from_initial_condition_data_dict('finish_elem_num')
+    finish_elem_num = int(sys.argv[13])
     if len(merged_elem_list) <= finish_elem_num:
         logging.info(f"最適化が完了していない要素の数が{finish_elem_num}以下になったため、要素の0/1を決定します")
         b_fin_optimize = 1
@@ -579,6 +714,7 @@ def main2(phase_num):
 
     lines_new = get_file_content(new_dat_temp_file_name)
         
+    rename_old_filename(new_dat_file_name)
     unused_node_set = all_node_id_set - used_node_id_set
     if unused_node_set:
         with open(new_dat_file_name, 'w', encoding='utf-8') as file:
@@ -592,7 +728,7 @@ def main2(phase_num):
                     if grid_node in unused_node_set:
                         line = f"${line}"
                 file.write(line)
-        b_erase_temp_file = False
+        b_erase_temp_file = om.get_from_flag_data_list(2)
         if b_erase_temp_file:
             delete_file(new_dat_temp_file_name)
     else:
@@ -600,25 +736,75 @@ def main2(phase_num):
 
     logging.info(f"最適化後のdatファイル名：{new_dat_file_name}")
 
-    ### nastran実行
-    # try:
-    #     nastran_exe_path = om.get_from_initial_condition_data_dict('nastran_exe_path')
-    #     result = subprocess.run([nastran_exe_path, new_dat_file_name], check=True)
-    #     logging.info(f"Nastran execution finished with return code: {result.returncode}")
-    #     print(f"Nastran execution finished with return code: {result.returncode}")
-    # except subprocess.CalledProcessError as e:
-    #     logging.error(f"Nastran execution failed: {e}")
-    #     print(f"Nastran execution failed: {e}")
+    # nastran実行
+    b_do_nastran = om.get_from_flag_data_list(3)
+    if b_do_nastran:
+        try:
+            nastran_exe_path = sys.argv[4]
+            result = subprocess.run([nastran_exe_path, new_dat_file_name], check=True)
+            start_wait_time = time.time()
+            max_wait_time = int(sys.argv[17])
+            f06_file_name = os.path.splitext(new_dat_file_name)[0] + ".f06"
+            op2_file_name = os.path.splitext(new_dat_file_name)[0] + ".op2"
+            files_exist = False
+            log_interval = 10
+            last_log_time = start_wait_time
+            logging.info(f"最適化後のファイルに対して、Nastranを実行中... 経過時間: 0秒")
+            while (time.time() - start_wait_time) < max_wait_time:
+                current_time = time.time()
+                if (current_time - last_log_time) >= log_interval:
+                    elapsed_time = int(current_time - start_wait_time)  # 経過秒数を計算
+                    logging.info(f"最適化後のファイルに対して、Nastranを実行中... 経過時間: {elapsed_time}秒")
+                    last_log_time = current_time
+                if os.path.exists(f06_file_name) and os.path.exists(op2_file_name):
+                    files_exist = True
+                    break
+                time.sleep(1)  # 1秒待機
+
+            if not files_exist:
+                logging.error(f"Nastranの実行時間が、{max_wait_time}秒を超えたため、次に進みます")
+            else:
+                logging.info(f"Nastran execution finished with return code: {result.returncode}")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Nastran execution failed: {e}")
+            print(f"Nastran execution failed: {e}")
 
     logging.info(f"success optimization on phase {phase_num}")
 
     return b_fin_optimize
 
 if __name__ == '__main__':
+    b_is_set_sys_argv_on_program = om.get_from_flag_data_list(1)
+    if b_is_set_sys_argv_on_program:
+            sys.argv = [
+                "cae_optimize_nastran.py", 
+                "C:\\work\\github\\q-annealing-d-wave-test\\test01.dat",
+                "C:\\work\\github\\q-annealing-d-wave-test\\test01.f06",
+                "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_info.log",
+                "C:\\MSC.Software\\MSC_Nastran\\20122\\bin\\nastranw.exe",
+                0.5,  ### target_density
+                0.1,  ### density_increment
+                2.0,  ### density_power
+                5,    ### cost_lambda
+                2,   ### loop_num
+                2,    ### start_phase_num
+                0.1,  ### decide_val_threshold
+                0.001,  ### threshold
+                0,    ### finish_elem_num
+                "proxy",
+                "name",
+                "name",
+                300   ### nastran_max_wait_time
+            ]
+    setup_logging(sys.argv[3])
     logging.info("\n\n")
-    if len(sys.argv) <= 2:
-        logging.info("Usage: python cae_optimize_nastran.py <dat_file_path> <f06_file_path>")
-        sys.argv = ["cae_optimize_nastran.py", "C:\\work\\github\\q-annealing-d-wave-test\\check1.dat", "C:\\work\\github\\q-annealing-d-wave-test\\check1.f06"]
+    if len(sys.argv) <= 17:
+        logging.info(
+            "Usage: python cae_optimize_nastran.py <dat_file_path> <f06_file_path> <log_file_path> <target_density> <density_increment> ... (need 17 arguments)"
+            )
+        logging.error(
+            "Please check arguments!!"
+            )
     logging.info("最適化を開始します")
     logging.info(f"引数: {sys.argv}")
     main()
