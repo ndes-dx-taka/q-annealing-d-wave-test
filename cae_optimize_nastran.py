@@ -1,9 +1,9 @@
-# [b_Use_proxy, b_is_set_sys_argv_on_program, b_erase_temp_file, b_do_nastran]
+# flag_data_listの説明：[b_Use_proxy, b_is_set_sys_argv_on_program, b_erase_temp_file, b_do_nastran]
 # 開発ネットワークでの連続実行では下記。
-# [True, False, True, True]
+# flag_data_list = [True, False, True, True]
 # nastranがない場合のデバッグ時は下記
-# [False, True, False, False]
-flag_data_list = [True, False, True, True]
+# flag_data_list = [False, True, False, False]
+flag_data_list = [False, False, False, False]
 
 from collections import defaultdict
 # from dwave.system.samplers import DWaveSampler
@@ -12,7 +12,6 @@ from dwave.system import LeapHybridSampler
 import logging
 import numpy as np
 import os
-# import pandas as pd
 import re
 import sys
 import shutil
@@ -36,7 +35,7 @@ def format_float(value):
 class OptimizeManager:
     def __init__(self, flag_data_list=None, youngsmodulus_data_dict=None):
         if flag_data_list is None:
-            print("Please set initial_condition_data_dict")
+            logging.info("Please set initial_condition_data_dict")
             flag_data_list = []
         if youngsmodulus_data_dict is None:
             youngsmodulus_data_dict = {}
@@ -69,33 +68,33 @@ class OptimizeManager:
                     if len(row) == 2:
                         key, value = row
                         self._youngsmodulus_data_dict[int(key)] = float(value)
-            print(f"Data loaded from {csvpath} into _youngsmodulus_data_dict.")
+            logging.info(f"Data loaded from {csvpath} into _youngsmodulus_data_dict.")
         else:
-            print("_youngsmodulus_data_dict is not empty, skipping load.")
+            logging.info("_youngsmodulus_data_dict is not empty, skipping load.")
 
 om = OptimizeManager(flag_data_list)
 
 def rename_file(original_file_path, new_file_path):
     try:
         os.rename(original_file_path, new_file_path)
-        print(f"ファイルが {original_file_path} から {new_file_path} にリネームされました。")
+        logging.info(f"ファイルが {original_file_path} から {new_file_path} にリネームされました。")
     except FileNotFoundError:
-        print(f"ファイル {original_file_path} が見つかりません。")
+        logging.info(f"ファイル {original_file_path} が見つかりません。")
     except PermissionError:
-        print(f"ファイル {original_file_path} に対するアクセスが拒否されました。")
+        logging.info(f"ファイル {original_file_path} に対するアクセスが拒否されました。")
     except Exception as e:
-        print(f"エラーが発生しました: {e}")
+        logging.info(f"エラーが発生しました: {e}")
 
 def delete_file(file_path):
     try:
         os.remove(file_path)
-        print(f"ファイル {file_path} が削除されました。")
+        logging.info(f"ファイル {file_path} が削除されました。")
     except FileNotFoundError:
-        print(f"ファイル {file_path} が見つかりません。")
+        logging.info(f"ファイル {file_path} が見つかりません。")
     except PermissionError:
-        print(f"ファイル {file_path} に対するアクセスが拒否されました。")
+        logging.info(f"ファイル {file_path} に対するアクセスが拒否されました。")
     except Exception as e:
-        print(f"エラーが発生しました: {e}")
+        logging.info(f"エラーが発生しました: {e}")
 
 def calculate_area(vertices):
     if len(vertices) == 3:
@@ -130,7 +129,7 @@ def increment_phase_number(filename):
         incremented_number = original_number + 1
         new_filename = filename.replace(f'phase_{original_number}', f'phase_{incremented_number}')
     else:
-        print("dat file name is maybe wrong. (increment_phase_number)")
+        logging.info("dat file name is maybe wrong. (increment_phase_number)")
     return new_filename
 
 def get_file_content(file_path):
@@ -141,10 +140,10 @@ def get_file_content(file_path):
         try:
             with open(file_path, 'r', encoding=encoding) as file:
                 content = file.readlines()
-            print(f"File successfully read with encoding: {encoding}")
+            logging.info(f"File successfully read with encoding: {encoding}")
             break
         except UnicodeDecodeError:
-            print(f"Failed to read file with encoding: {encoding}")
+            logging.info(f"Failed to read file with encoding: {encoding}")
             continue
     else:
         # 全てのエンコーディングで失敗した場合
@@ -412,6 +411,7 @@ def main():
 
     for i in range(start_phase_num, loop_num):
         phase_num = i + 1
+        logging.info(f"最適化処理開始：{phase_num}回目（最大最適化ループ回数{loop_num}）")
         result = main2(phase_num)
         if result == -1:
             logging.error(f"{phase_num}/{loop_num}の処理で失敗しました")
@@ -522,7 +522,7 @@ def main2(phase_num):
         merged_elem_list.append(merged_dict)
     
     elapsed_time_1 = time.time() - start_time_1
-    logging.info(f"入力データの読み込みにかかった時間：{str(elapsed_time_1)}")
+    logging.info(f"入力データの読み込みにかかった時間：{str(elapsed_time_1)} [s]")
 
     start_time_2 = time.time()
 
@@ -606,6 +606,11 @@ def main2(phase_num):
 
     ising_index_dict = {}
 
+    elapsed_time_2 = time.time() - start_time_2
+    logging.info(f"最適化処理の準備にかかった時間：{str(elapsed_time_2)} [s]")
+
+    start_time_3 = time.time()
+
     b_Use_proxy = om.get_from_flag_data_list(0)
     if b_Use_proxy:
         proxy_url = sys.argv[14]
@@ -616,6 +621,11 @@ def main2(phase_num):
 
     sampler = LeapHybridSampler()
     response = sampler.sample_ising(h, J)
+
+    elapsed_time_3 = time.time() - start_time_3
+    logging.info(f"最適化処理の実行にかかった時間：{str(elapsed_time_3)} [s]")
+
+    start_time_4 = time.time()
 
     for sample, E in response.data(fields=['sample','energy']):
         S_minus_1 = [k for k,v in sample.items() if v == -1]
@@ -684,7 +694,7 @@ def main2(phase_num):
                     mat_id = int(line[8:16].strip())
                     youngmodulus_value = mat_youngmodulus.get(str(mat_id), None)
                     if youngmodulus_value is None:
-                        print(f"youngmodulus_value id({mat_id}) has already fixed.")
+                        logging.info(f"youngmodulus_value id({mat_id}) has already fixed.")
                     else:
                         youngmodulus_formatted = format_float(youngmodulus_value)
                         line = (
@@ -736,6 +746,11 @@ def main2(phase_num):
 
     logging.info(f"最適化後のdatファイル名：{new_dat_file_name}")
 
+    elapsed_time_4 = time.time() - start_time_4
+    logging.info(f"最適化処理の結果の解析とdatファイル出力にかかった時間：{str(elapsed_time_4)} [s]")
+
+    start_time_5 = time.time()
+
     # nastran実行
     b_do_nastran = om.get_from_flag_data_list(3)
     if b_do_nastran:
@@ -764,12 +779,15 @@ def main2(phase_num):
             if not files_exist:
                 logging.error(f"Nastranの実行時間が、{max_wait_time}秒を超えたため、次に進みます")
             else:
-                logging.info(f"Nastran execution finished with return code: {result.returncode}")
+                logging.info(f"Nastranの実行がリターンコード{result.returncode}で終了しました。")
         except subprocess.CalledProcessError as e:
-            logging.error(f"Nastran execution failed: {e}")
-            print(f"Nastran execution failed: {e}")
+            logging.error(f"Nastranの実行に失敗しました。: {e}")
 
-    logging.info(f"success optimization on phase {phase_num}")
+    elapsed_time_5 = time.time() - start_time_5
+    logging.info(f"nastran解析にかかった時間：{str(elapsed_time_5)} [s]")
+
+    logging.info(f"phase_{phase_num}の最適化処理に成功しました。")
+    logging.info("\n")
 
     return b_fin_optimize
 
@@ -805,6 +823,6 @@ if __name__ == '__main__':
         logging.error(
             "Please check arguments!!"
             )
-    logging.info("最適化を開始します")
-    logging.info(f"引数: {sys.argv}")
+    logging.info("* * * * * * * * * * 最適化プログラムを開始します * * * * * * * * * *")
+    logging.info(f"コマンドライン引数: {sys.argv}")
     main()
