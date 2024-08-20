@@ -1,15 +1,26 @@
 # flag_data_listの説明：[b_Use_proxy, b_is_set_sys_argv_on_program, b_erase_temp_file, b_do_nastran]
 # 開発ネットワークでの連続実行では下記。
-# flag_data_list = [True, False, True, True]
+flag_data_list = [True, False, True, True]
 # nastranがない場合のデバッグ時は下記
 # flag_data_list = [False, True, False, False]
-flag_data_list = [False, False, False, False]
+# flag_data_list = [False, False, False, False]
+# flag_data_list = [True, False, True, False]
+
+import logging
+# LOG_LEVELS = {
+#     1: logging.DEBUG,      # 1: デバッグレベル
+#     2: logging.INFO,       # 2: 情報レベル
+#     3: logging.WARNING,    # 3: 警告レベル
+#     4: logging.ERROR,      # 4: エラーレベル
+#     5: logging.CRITICAL,   # 5: クリティカルレベル
+#     6: logging.NOTSET      # 6: ログ出力なし (NOTSET は全てのメッセージを無視)
+# }
+log_level = logging.DEBUG
 
 from collections import defaultdict
 # from dwave.system.samplers import DWaveSampler
 # from dwave.system.composites import EmbeddingComposite
 from dwave.system import LeapHybridSampler
-import logging
 import numpy as np
 import os
 import re
@@ -18,9 +29,10 @@ import shutil
 import subprocess
 import time
 import csv
+import pprint
 
 def setup_logging(logfilepath):
-    logging.basicConfig(level=logging.INFO, 
+    logging.basicConfig(level=log_level,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[
                         logging.FileHandler(logfilepath)
@@ -73,6 +85,9 @@ class OptimizeManager:
             logging.info("_youngsmodulus_data_dict is not empty, skipping load.")
 
 om = OptimizeManager(flag_data_list)
+
+class CustomError(Exception):
+    pass
 
 def rename_file(original_file_path, new_file_path):
     try:
@@ -386,6 +401,8 @@ def extract_stress_values(filename):
 
             stress_data[element_id] = (stress_part_1, stress_part_2, stress_part_3)
 
+    logging.debug(f"{filename}における、辞書stress_dataのデータ内容:\n" + pprint.pformat(stress_data, indent=4))
+
     return stress_data
 
 def check_skip_optimize(youngmodulus, initial_youngmodulus, threshold, phase_num):
@@ -400,6 +417,65 @@ def calculate_density(E_i, E_0, n):
         raise ValueError("E_0 must be non-zero.")
     return (E_i / E_0) ** (1 / n)
 
+def check_nastran_log_for_pattern(log_file_name):
+    pattern = re.compile(r'.*MSC\.Nastran finished.+')
+    with open(log_file_name, 'r') as file:
+        for line in file:
+            if pattern.match(line):
+                return True
+    return False
+
+def check_nastran_f06_for_pattern(f06_file_name):
+    flag1 = False
+    flag2 = False
+    pattern1 = re.compile(r'.*\* \* \* END OF JOB \* \* \*')
+    pattern2 = re.compile(r'.*\*\*\* USER FATAL MESSAGE')
+    with open(f06_file_name, 'r') as file:
+        for line in file:
+            if pattern1.match(line):
+                flag1 = True
+            if pattern2.match(line):
+                flag2 = True
+    if flag1 == True and flag2 == False:
+        return True
+    return False
+
+def run_nastran(dat_file_name, nastran_exe_path):
+    try:
+        result = subprocess.run([nastran_exe_path, dat_file_name], check=True)
+        f06_file_name = os.path.splitext(dat_file_name)[0] + ".f06"
+        log_file_name = os.path.splitext(dat_file_name)[0] + ".log"
+        log_interval = 30
+        start_wait_time = time.time()
+        last_log_time = start_wait_time
+        logging.info(f"最適化後のファイルに対して、Nastranを実行中... 経過時間: 0秒")
+        print(f"最適化後のファイルに対して、Nastranを実行中... 経過時間: 0秒")
+        while True:
+            time.sleep(5)  # 5秒待機
+            current_time = time.time()
+            if (current_time - last_log_time) >= log_interval:
+                elapsed_time = int(current_time - start_wait_time)  # 経過秒数を計算
+                logging.info(f"最適化後のファイルに対して、Nastranを実行中... 経過時間: {elapsed_time}秒")
+                print(f"最適化後のファイルに対して、Nastranを実行中... 経過時間: {elapsed_time}秒")
+                last_log_time = current_time
+            if check_nastran_log_for_pattern(log_file_name):
+                if check_nastran_f06_for_pattern(f06_file_name) == False:
+                    print(f"{f06_file_name}の記載に異常があるようです。")
+                    raise CustomError(f"{f06_file_name}の記載に異常があるようです。")
+                logging.debug(f"{f06_file_name}と{log_file_name}から終了の記載が見つかったため、Nastranが終了したとして次に進みます。")
+                break
+        logging.info(f"Nastranの実行がリターンコード{result.returncode}で終了しました。")
+        print(f"Nastranの実行がリターンコード{result.returncode}で終了しました。")
+    except CustomError as e:
+        logging.info(f"Nastranの実行で異常が発生しました。: {e}")
+        print(f"Nastranの実行で異常が発生しました。: {e}")
+        return 1
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Nastranの実行に失敗しました。: {e}")
+        print(f"Nastranの実行に失敗しました。: {e}")
+        return 2
+    return 0
+
 def main():
     loop_num = int(sys.argv[9])
     start_phase_num = int(sys.argv[10]) - 1
@@ -411,17 +487,28 @@ def main():
 
     for i in range(start_phase_num, loop_num):
         phase_num = i + 1
-        logging.info(f"最適化処理開始：{phase_num}回目（最大最適化ループ回数{loop_num}）")
+        logging.info(f"最適化処理開始：{phase_num}回目（最大最適化ループ回数：{loop_num}回）")
+        print(f"最適化処理開始：{phase_num}回目（最大最適化ループ回数：{loop_num}回）")
         result = main2(phase_num)
         if result == -1:
             logging.error(f"{phase_num}/{loop_num}の処理で失敗しました")
+            print(f"{phase_num}/{loop_num}の処理で失敗しました")
         if result == 1:
             logging.info(f"{phase_num}/{loop_num}で、最適化を完了しました")
+            print(f"{phase_num}/{loop_num}で、最適化を完了しました")
 
 def main2(phase_num):
     dat_file_path = sys.argv[1]
-    f06_file_path = sys.argv[2]
+    f06_file_path = os.path.splitext(dat_file_path)[0] + ".f06"
     start_time_1 = time.time()
+
+    b_do_nastran = om.get_from_flag_data_list(3)
+    nastran_exe_path = sys.argv[4]
+    if phase_num == 1:
+        if b_do_nastran:
+            return_code = run_nastran(dat_file_path, nastran_exe_path)
+            if return_code != 0:
+                return -1
 
     target_density = float(sys.argv[5])
     density_increment = float(sys.argv[6])
@@ -435,6 +522,7 @@ def main2(phase_num):
         process_nastran_file_fixed_length(dat_file_path, input_dat_file_name)
 
     logging.info(f"解析に使用した入力ファイル名：{input_dat_file_name}")
+    print(f"解析に使用した入力ファイル名：{input_dat_file_name}")
 
     node_dict = {}
     pshell_dict = {}
@@ -500,10 +588,17 @@ def main2(phase_num):
         merged_dict['thickness'] = thickness
         merged_dict['youngsmodulus'] = mat1_value[0]
         merged_dict['poissonratio'] = mat1_value[1]
-        stress_value = stress_dict[eid]
-        merged_dict['stress_part_1'] = stress_value[0]
-        merged_dict['stress_part_2'] = stress_value[1]
-        merged_dict['stress_part_3'] = stress_value[2]
+        try:
+            stress_value = stress_dict[eid]
+            merged_dict['stress_part_1'] = stress_value[0]
+            merged_dict['stress_part_2'] = stress_value[1]
+            merged_dict['stress_part_3'] = stress_value[2]
+        except KeyError:
+            print(f"KeyError: The key '{eid}' was not found in the dictionary.")
+            raise
+        except Exception as e:
+            print(f"An error occurred with eid '{eid}': {e}")
+            raise
 
         node_data = []
         for nid in cquad4_ctria3_value:
@@ -609,21 +704,19 @@ def main2(phase_num):
     elapsed_time_2 = time.time() - start_time_2
     logging.info(f"最適化処理の準備にかかった時間：{str(elapsed_time_2)} [s]")
 
-    start_time_3 = time.time()
+    logging.info(f"{phase_num}回目の最適化を開始します。")
+    print(f"{phase_num}回目の最適化を開始します。")
+    print("最適化実行中…")
 
-    b_Use_proxy = om.get_from_flag_data_list(0)
-    if b_Use_proxy:
-        proxy_url = sys.argv[14]
-        username = sys.argv[15]
-        password = sys.argv[16]
-        os.environ['HTTP_PROXY'] = f"http://{username}:{password}@{proxy_url}"
-        os.environ['HTTPS_PROXY'] = f"http://{username}:{password}@{proxy_url}"
+    start_time_3 = time.time()
 
     sampler = LeapHybridSampler()
     response = sampler.sample_ising(h, J)
 
     elapsed_time_3 = time.time() - start_time_3
-    logging.info(f"最適化処理の実行にかかった時間：{str(elapsed_time_3)} [s]")
+    logging.info(f"{phase_num}回目の最適化処理の実行にかかった時間：{str(elapsed_time_3)} [s]")
+    print(f"{phase_num}回目の最適化が終わりました。")
+    print(f"最適化処理の実行にかかった時間：{str(elapsed_time_3)} [s]")
 
     start_time_4 = time.time()
 
@@ -752,41 +845,16 @@ def main2(phase_num):
     start_time_5 = time.time()
 
     # nastran実行
-    b_do_nastran = om.get_from_flag_data_list(3)
     if b_do_nastran:
-        try:
-            nastran_exe_path = sys.argv[4]
-            result = subprocess.run([nastran_exe_path, new_dat_file_name], check=True)
-            start_wait_time = time.time()
-            max_wait_time = int(sys.argv[17])
-            f06_file_name = os.path.splitext(new_dat_file_name)[0] + ".f06"
-            op2_file_name = os.path.splitext(new_dat_file_name)[0] + ".op2"
-            files_exist = False
-            log_interval = 10
-            last_log_time = start_wait_time
-            logging.info(f"最適化後のファイルに対して、Nastranを実行中... 経過時間: 0秒")
-            while (time.time() - start_wait_time) < max_wait_time:
-                current_time = time.time()
-                if (current_time - last_log_time) >= log_interval:
-                    elapsed_time = int(current_time - start_wait_time)  # 経過秒数を計算
-                    logging.info(f"最適化後のファイルに対して、Nastranを実行中... 経過時間: {elapsed_time}秒")
-                    last_log_time = current_time
-                if os.path.exists(f06_file_name) and os.path.exists(op2_file_name):
-                    files_exist = True
-                    break
-                time.sleep(1)  # 1秒待機
-
-            if not files_exist:
-                logging.error(f"Nastranの実行時間が、{max_wait_time}秒を超えたため、次に進みます")
-            else:
-                logging.info(f"Nastranの実行がリターンコード{result.returncode}で終了しました。")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Nastranの実行に失敗しました。: {e}")
+        return_code = run_nastran(new_dat_file_name, nastran_exe_path)
+        if return_code != 0:
+            return -1
 
     elapsed_time_5 = time.time() - start_time_5
     logging.info(f"nastran解析にかかった時間：{str(elapsed_time_5)} [s]")
 
-    logging.info(f"phase_{phase_num}の最適化処理に成功しました。")
+    logging.info(f"{phase_num}回目の最適化処理に成功しました。")
+    print(f"{phase_num}回目の最適化処理に成功しました。")
     logging.info("\n")
 
     return b_fin_optimize
@@ -824,5 +892,7 @@ if __name__ == '__main__':
             "Please check arguments!!"
             )
     logging.info("* * * * * * * * * * 最適化プログラムを開始します * * * * * * * * * *")
+    print("* * * * * * * * * * 最適化プログラムを開始します * * * * * * * * * *")
     logging.info(f"コマンドライン引数: {sys.argv}")
+    print(f"コマンドライン引数: {sys.argv}")
     main()
