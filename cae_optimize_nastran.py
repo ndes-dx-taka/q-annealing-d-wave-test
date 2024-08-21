@@ -1,10 +1,11 @@
-# flag_data_listの説明：[b_Use_proxy, b_is_set_sys_argv_on_program, b_erase_temp_file, b_do_nastran]
+# flag_data_listの説明：[b_do_optimize, b_is_set_sys_argv_on_program, b_erase_temp_file, b_do_nastran, b_use_thickness]
 # 開発ネットワークでの連続実行では下記。
-flag_data_list = [True, False, True, True]
+flag_data_list = [True, False, True, True, True]
 # nastranがない場合のデバッグ時は下記
-# flag_data_list = [False, True, False, False]
-# flag_data_list = [False, False, False, False]
-# flag_data_list = [True, True, True, False]
+# flag_data_list = [True, True, False, False]
+# flag_data_list = [True, False, False, False]
+# 現在使用中
+# flag_data_list = [False, True, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -18,18 +19,19 @@ import logging
 log_level = logging.DEBUG
 
 from collections import defaultdict
+import csv
 # from dwave.system.samplers import DWaveSampler
 # from dwave.system.composites import EmbeddingComposite
 from dwave.system import LeapHybridSampler
 import numpy as np
 import os
+import pprint
+import random
 import re
 import sys
 import shutil
 import subprocess
 import time
-import csv
-import pprint
 
 def setup_logging(logfilepath):
     logging.basicConfig(level=log_level,
@@ -39,50 +41,54 @@ def setup_logging(logfilepath):
                         # logging.StreamHandler()
                     ])
 
-def format_float(value):
+def format_float_youngmodulus(value):
     formatted_value = "{:.4E}".format(value)
     parts = formatted_value.split('E')
     return f"{parts[0]}E{int(parts[1])}"
 
+def format_float_thickness(value):
+    return "{:.2E}".format(value)
+
 class OptimizeManager:
-    def __init__(self, flag_data_list=None, youngsmodulus_data_dict=None):
+    def __init__(self, flag_data_list=None, thickness_youngsmodulus_data_dict=None):
         if flag_data_list is None:
             logging.info("Please set initial_condition_data_dict")
             flag_data_list = []
-        if youngsmodulus_data_dict is None:
-            youngsmodulus_data_dict = {}
+        if thickness_youngsmodulus_data_dict is None:
+            thickness_youngsmodulus_data_dict = {}
         self._flag_data_list = flag_data_list
-        self._youngsmodulus_data_dict = youngsmodulus_data_dict
+        self._thickness_youngsmodulus_data_dict = thickness_youngsmodulus_data_dict
     
     def get_from_flag_data_list(self, index):
         return self._flag_data_list[index]
     
-    def add_to_youngsmodulus_data_dict(self, key, value):
-        self._youngsmodulus_data_dict[key] = value
+    def add_to_thickness_youngsmodulus_data_dict(self, key, value):
+        self._thickness_youngsmodulus_data_dict[key] = value
 
-    def get_from_youngsmodulus_data_dict(self, key):
-        return self._youngsmodulus_data_dict.get(key, None)
+    def get_from_thickness_youngsmodulus_data_dict(self, key):
+        return self._thickness_youngsmodulus_data_dict.get(key, None)
     
-    def write_youngsmodulus_data_to_csv(self, csvpath):
+    def write_thickness_youngsmodulus_data_to_csv(self, csvpath):
         with open(csvpath, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
 
-            for key, value in self._youngsmodulus_data_dict.items():
-                value_format = format_float(value)
+            for key, value in self._thickness_youngsmodulus_data_dict.items():
+                b_thickness = self.get_from_flag_data_list(4)
+                value_format = format_float_thickness(value) if b_thickness else format_float_youngmodulus(value)
                 writer.writerow([key, str(value_format)])
 
-    def load_youngsmodulus_data_from_csv(self, csvpath):
-        if len(self._youngsmodulus_data_dict) == 0:
+    def load_thickness_youngsmodulus_data_from_csv(self, csvpath):
+        if len(self._thickness_youngsmodulus_data_dict) == 0:
             with open(csvpath, 'r') as csvfile:
                 reader = csv.reader(csvfile)
 
                 for row in reader:
                     if len(row) == 2:
                         key, value = row
-                        self._youngsmodulus_data_dict[int(key)] = float(value)
-            logging.info(f"Data loaded from {csvpath} into _youngsmodulus_data_dict.")
+                        self._thickness_youngsmodulus_data_dict[int(key)] = float(value)
+            logging.info(f"Data loaded from {csvpath} into _thickness_youngsmodulus_data_dict.")
         else:
-            logging.info("_youngsmodulus_data_dict is not empty, skipping load.")
+            logging.info("_thickness_youngsmodulus_data_dict is not empty, skipping load.")
 
 om = OptimizeManager(flag_data_list)
 
@@ -222,14 +228,13 @@ def rename_old_filename(original_file_name):
     rename_file(original_file_name, old_filename)
     return
 
-def process_nastran_file_fixed_length(input_file_path, output_file_path):
+def process_first_phase_zero_nastran_file(input_file_path, output_file_path):
     cquad4_ctria3_cards_dict = {}
     pshell_card_dict = {}
     mat1_card_dict = {}
     cquad4_ctria3_pshell_id_dict = {}
     pshell_mat1_id_dict = {}
     elem_type_dict = {}  # CQUAD4: 0,  CTRIA3: 1
-    cquad4_ctria3_id_youngmodulus_dict = {}
 
     base_name, ext = os.path.splitext(input_file_path)
 
@@ -272,7 +277,6 @@ def process_nastran_file_fixed_length(input_file_path, output_file_path):
             format_field_right(cquad4_ctria3_id, 8) +
             mat1_card[16:]
         )
-        cquad4_ctria3_id_youngmodulus_dict
         elem_type_id = elem_type_dict[cquad4_ctria3_id]
         elem_type_str = None
         if elem_type_id == 0:
@@ -291,11 +295,13 @@ def process_nastran_file_fixed_length(input_file_path, output_file_path):
         new_content.append(new_cquad4_ctria3)
 
         youngsmodulus = float(mat1_card[16:24].strip())
-        om.add_to_youngsmodulus_data_dict(cquad4_ctria3_id, youngsmodulus)
+        thickness = float(pshell_card[24:32].strip())
+        b_use_thickness = om.get_from_flag_data_list(4)
+        om.add_to_thickness_youngsmodulus_data_dict(cquad4_ctria3_id, (thickness if b_use_thickness else youngsmodulus))
 
     reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
     rename_old_filename(reserve_data_csv)
-    om.write_youngsmodulus_data_to_csv(reserve_data_csv)
+    om.write_thickness_youngsmodulus_data_to_csv(reserve_data_csv)
 
     rename_old_filename(output_file_path)
     with open(output_file_path, 'w', encoding='utf-8') as file:
@@ -405,17 +411,22 @@ def extract_stress_values(filename):
 
     return stress_data
 
-def check_skip_optimize(youngmodulus, initial_youngmodulus, threshold, phase_num):
+def check_skip_optimize(thickness_youngmodulus, initial_thickness_youngmodulus, threshold, phase_num):
     if phase_num == 1:
         return False
-    if abs(youngmodulus - initial_youngmodulus) < threshold:
+    if abs(thickness_youngmodulus - initial_thickness_youngmodulus) < threshold:
         return True
     return False
 
-def calculate_density(E_i, E_0, n):
-    if E_0 == 0:
-        raise ValueError("E_0 must be non-zero.")
-    return (E_i / E_0) ** (1 / n)
+def calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness):
+    if b_use_thickness:
+        if initial_thickness_youngsmodulus == 0:
+            raise ValueError("thickness must be non-zero.")
+        return (thickness_youngmodulus / initial_thickness_youngsmodulus)
+    else:
+        if initial_thickness_youngsmodulus == 0:
+            raise ValueError("E_0 must be non-zero.")
+        return (thickness_youngmodulus / initial_thickness_youngsmodulus) ** (1 / density_power)
 
 def check_nastran_log_for_pattern(log_file_name):
     pattern = re.compile(r'.*MSC\.Nastran finished.+')
@@ -480,10 +491,11 @@ def main():
     loop_num = int(sys.argv[9])
     start_phase_num = int(sys.argv[10]) - 1
 
+    # 途中からの実行に対応
     if start_phase_num >= 1:
         base_name, ext = os.path.splitext(sys.argv[1])
         reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
-        om.load_youngsmodulus_data_from_csv(reserve_data_csv)
+        om.load_thickness_youngsmodulus_data_from_csv(reserve_data_csv)
 
     for i in range(start_phase_num, loop_num):
         phase_num = i + 1
@@ -510,7 +522,7 @@ def main2(phase_num):
             if return_code != 0:
                 return -1
 
-    target_density = float(sys.argv[5])
+    target_thickness_density_percentage = float(sys.argv[5])
     density_increment = float(sys.argv[6])
     density_power = float(sys.argv[7])
     cost_lambda = float(sys.argv[8])
@@ -519,11 +531,12 @@ def main2(phase_num):
 
     input_dat_file_name = "{}_phase_{}.dat".format(str(dat_file_path)[:-4], phase_num - 1)
     if phase_num == 1:
-        process_nastran_file_fixed_length(dat_file_path, input_dat_file_name)
+        process_first_phase_zero_nastran_file(dat_file_path, input_dat_file_name)
 
     logging.info(f"解析に使用した入力ファイル名：{input_dat_file_name}")
     print(f"解析に使用した入力ファイル名：{input_dat_file_name}")
 
+    b_use_thickness = om.get_from_flag_data_list(4)
     node_dict = {}
     pshell_dict = {}
     mat1_dict = {}
@@ -550,12 +563,22 @@ def main2(phase_num):
                 elem_id = int(line[8:16].strip())
                 mat_id = int(line[16:24].strip())
                 thickness = float(line[24:32].strip())
-                pshell_dict[elem_id] = [mat_id, thickness]
+                initial_thickness_temp = om.get_from_thickness_youngsmodulus_data_dict(elem_id)
+                b_skip_optimize_pshell = False
+                if b_use_thickness:
+                    if check_skip_optimize(thickness, initial_thickness_temp, threshold, phase_num):
+                        b_skip_optimize_pshell = True
+                if not b_skip_optimize_pshell:
+                    pshell_dict[elem_id] = [mat_id, thickness]
             if line.startswith('MAT1'):
                 mat_id = int(line[8:16].strip())
                 youngmodulus = float(line[16:24].strip())
-                initial_youngsmodulus = om.get_from_youngsmodulus_data_dict(mat_id)
-                if check_skip_optimize(youngmodulus, initial_youngsmodulus, threshold, phase_num):
+                initial_youngsmodulus_temp = om.get_from_thickness_youngsmodulus_data_dict(mat_id)
+                b_skip_optimize_mat1 = False
+                if not b_use_thickness:
+                    if check_skip_optimize(youngmodulus, initial_youngsmodulus_temp, threshold, phase_num):
+                        b_skip_optimize_mat1 = True
+                if b_skip_optimize_mat1:
                     del pshell_dict[mat_id]
                 else:
                     poissonratio = float(line[32:40].strip())
@@ -640,7 +663,10 @@ def main2(phase_num):
     energy_list_for_scale = []
     volume_list_for_scale = []
 
-    first_density = target_density
+    # b_use_thicknessの時は、density_power=0とした相当の動作をするケースのための変数
+    density_power_calc = 0 if b_use_thickness else density_power
+
+    first_thickness_density_percentage = target_thickness_density_percentage
     ising_index_eid_map = {}
     nInternalid = len(merged_elem_list)
     h = defaultdict(int)
@@ -651,26 +677,28 @@ def main2(phase_num):
         stress_part_2 = elem.get('stress_part_2', 0)
         stress_part_3 = elem.get('stress_part_3', 0)
         poissonratio = float(elem.get('poissonratio', 0))
+        thickness = float(elem.get('thickness', 0))
         youngsmodulus = float(elem.get('youngsmodulus', 0))
         volume = float(elem.get('volume', 0))
 
         ising_index_eid_map[eid] = index
 
-        density_now = 0
-        initial_youngsmodulus = om.get_from_youngsmodulus_data_dict(eid)
+        thickness_density_percentage_now = 0.0
+        initial_thickness_youngsmodulus = om.get_from_thickness_youngsmodulus_data_dict(eid)
         if phase_num == 1:
-            density_now = first_density
+            thickness_density_percentage_now = first_thickness_density_percentage
         else:
-            density_now = calculate_density(youngsmodulus, initial_youngsmodulus, density_power)
+            thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
+            thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness)
 
-        density_plus_delta = density_now + density_increment
-        density_minus_delta = density_now - density_increment
+        density_plus_delta = thickness_density_percentage_now + density_increment
+        density_minus_delta = thickness_density_percentage_now - density_increment
 
-        alpha_value = pow(density_plus_delta, (1 - density_power))
-        beta_value = pow(density_minus_delta, (1 - density_power))
+        alpha_value = pow(density_plus_delta, (1 - density_power_calc))
+        beta_value = pow(density_minus_delta, (1 - density_power_calc))
 
-        # kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngsmodulus
-        kappa_i = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) * volume / initial_youngsmodulus
+        # kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_thickness_youngsmodulus
+        kappa_i = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) * volume / initial_thickness_youngsmodulus
         
         energy_list_for_scale.append(alpha_value * kappa_i)
         energy_list_for_scale.append(beta_value * kappa_i)
@@ -687,26 +715,28 @@ def main2(phase_num):
         stress_part_2 = elem.get('stress_part_2', 0)
         stress_part_3 = elem.get('stress_part_3', 0)
         poissonratio = float(elem.get('poissonratio', 0))
+        thickness = float(elem.get('thickness', 0))
         youngsmodulus = float(elem.get('youngsmodulus', 0))
         volume = float(elem.get('volume', 0))
 
         ising_index_eid_map[eid] = index
 
-        density_now = 0
-        initial_youngsmodulus = om.get_from_youngsmodulus_data_dict(eid)
+        thickness_density_percentage_now = 0.0
+        initial_thickness_youngsmodulus = om.get_from_thickness_youngsmodulus_data_dict(eid)
         if phase_num == 1:
-            density_now = first_density
+            thickness_density_percentage_now = first_thickness_density_percentage
         else:
-            density_now = calculate_density(youngsmodulus, initial_youngsmodulus, density_power)
+            thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
+            thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness)
 
-        density_plus_delta = density_now + density_increment
-        density_minus_delta = density_now - density_increment
+        density_plus_delta = thickness_density_percentage_now + density_increment
+        density_minus_delta = thickness_density_percentage_now - density_increment
 
-        alpha_value = pow(density_plus_delta, (1 - density_power))
-        beta_value = pow(density_minus_delta, (1 - density_power))
+        alpha_value = pow(density_plus_delta, (1 - density_power_calc))
+        beta_value = pow(density_minus_delta, (1 - density_power_calc))
         k_0 = (alpha_value - beta_value) / 2.0
-        # kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_youngsmodulus
-        kappa_i = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) * volume / initial_youngsmodulus
+        # kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_thickness_youngsmodulus
+        kappa_i = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) * volume / initial_thickness_youngsmodulus
 
         h_first = k_0 * kappa_i / std_of_energy_list / np.sqrt(nInternalid) / 3.0
         h[index] = h_first
@@ -714,8 +744,6 @@ def main2(phase_num):
         for j_index in range(index + 1, nInternalid):
             volume_j = merged_elem_list[j_index].get('volume', 0)
             J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / pow(std_of_volume_list, 2) / nInternalid / 9.0
-
-    ising_index_dict = {}
 
     elapsed_time_2 = time.time() - start_time_2
     logging.info(f"最適化処理の準備にかかった時間：{str(elapsed_time_2)} [s]")
@@ -726,27 +754,35 @@ def main2(phase_num):
 
     start_time_3 = time.time()
 
-    sampler = LeapHybridSampler()
-    response = sampler.sample_ising(h, J)
+    ising_index_dict = {}
+
+    b_do_optimize = om.get_from_flag_data_list(0)
+    if b_do_optimize:
+        sampler = LeapHybridSampler()
+        response = sampler.sample_ising(h, J)
+
+        for sample, E in response.data(fields=['sample','energy']):
+            S_minus_1 = [k for k,v in sample.items() if v == -1]
+            S_plus_1 = [k for k,v in sample.items() if v == 1]
+
+            for elem in S_minus_1:
+                ising_index_dict[elem] = -1
+
+            for elem in S_plus_1:
+                ising_index_dict[elem] = 1
+    else:
+        # テスト用(最適化のリソース節約のため)
+        for index, elem in enumerate(merged_elem_list):
+            ising_index_dict[index] = (1 if random.random() < 0.5 else -1)
 
     elapsed_time_3 = time.time() - start_time_3
-    logging.info(f"{phase_num}回目の最適化処理の実行にかかった時間：{str(elapsed_time_3)} [s]")
+    logging.info(f"{phase_num}回目の最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
     print(f"{phase_num}回目の最適化が終わりました。")
-    print(f"最適化処理の実行にかかった時間：{str(elapsed_time_3)} [s]")
+    print(f"最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
 
     start_time_4 = time.time()
 
-    for sample, E in response.data(fields=['sample','energy']):
-        S_minus_1 = [k for k,v in sample.items() if v == -1]
-        S_plus_1 = [k for k,v in sample.items() if v == 1]
-
-        for elem in S_minus_1:
-            ising_index_dict[elem] = -1
-
-        for elem in S_plus_1:
-            ising_index_dict[elem] = 1
-
-    mat_youngmodulus = {}
+    mat_thickness_youngmodulus = {}
     zero_fix_density_index_list = []
     b_fin_optimize = 0
     finish_elem_num = int(sys.argv[13])
@@ -756,11 +792,13 @@ def main2(phase_num):
     
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
+        thickness = float(elem.get('thickness', 0))
         youngsmodulus = float(elem.get('youngsmodulus', 0))
-        dens_value_old = first_density
-        initial_youngsmodulus = om.get_from_youngsmodulus_data_dict(eid)
+        dens_value_old = first_thickness_density_percentage
+        initial_thickness_youngsmodulus = om.get_from_thickness_youngsmodulus_data_dict(eid)
         if not phase_num == 1:
-            dens_value_old = calculate_density(youngsmodulus, initial_youngsmodulus, density_power)
+            thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
+            dens_value_old = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness)
         ising_index = ising_index_eid_map[eid]
         ising_value = ising_index_dict[ising_index]
         dens_value = dens_value_old + density_increment * ising_value
@@ -771,15 +809,18 @@ def main2(phase_num):
             else:
                dens_value = 0.0
                          
-        b_use_youngmodulus = True
+        b_use_thickness_youngmodulus = True
         if dens_value >= (1.0 - decide_val_threshold - threshold):
             dens_value = 1.0
         if dens_value <= (decide_val_threshold + threshold):
             zero_fix_density_index_list.append(int(eid))
-            b_use_youngmodulus = False
+            b_use_thickness_youngmodulus = False
 
-        if b_use_youngmodulus == True:
-            mat_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_youngsmodulus
+        if b_use_thickness_youngmodulus == True:
+            if b_use_thickness:
+                mat_thickness_youngmodulus[str(eid)] = dens_value * initial_thickness_youngsmodulus
+            else:
+                mat_thickness_youngmodulus[str(eid)] = pow(dens_value, density_power) * initial_thickness_youngsmodulus
 
     lines = get_file_content(input_dat_file_name)
 
@@ -791,9 +832,27 @@ def main2(phase_num):
         for line in lines:
             if line.startswith('PSHELL'):
                 elem_id = int(line[8:16].strip())
+                mat_id = int(line[16:24].strip())
                 if elem_id in zero_fix_density_index_list:
                     line = f"${line}"
                     same_pshell_flag = 1
+                else:
+                    if b_use_thickness:
+                        line_strip = line.strip()
+                        thickness_value = mat_thickness_youngmodulus.get(str(elem_id), None)
+                        if thickness_value is None:
+                            logging.info(f"thickness_value id({elem_id}) has already fixed.")
+                        else:
+                            thickness_formatted = format_float_thickness(thickness_value)
+                            line = (
+                                format_field_left('PSHELL', 8) +
+                                format_field_right(elem_id, 8) +
+                                format_field_right(mat_id, 8) +
+                                format_field_right(thickness_formatted, 8) +
+                                line_strip[32:] +
+                                '\n'
+                            )
+
             if line.startswith('MAT1'):
                 if same_pshell_flag == 1:
                     same_pshell_flag = 2
@@ -801,18 +860,19 @@ def main2(phase_num):
                 else:
                     line_strip = line.strip()
                     mat_id = int(line[8:16].strip())
-                    youngmodulus_value = mat_youngmodulus.get(str(mat_id), None)
-                    if youngmodulus_value is None:
-                        logging.info(f"youngmodulus_value id({mat_id}) has already fixed.")
-                    else:
-                        youngmodulus_formatted = format_float(youngmodulus_value)
-                        line = (
-                            format_field_left('MAT1', 8) +
-                            format_field_right(mat_id, 8) +
-                            format_field_right(youngmodulus_formatted, 8) +
-                            line_strip[24:] +
-                            '\n'
-                        )
+                    if not b_use_thickness:
+                        youngmodulus_value = mat_thickness_youngmodulus.get(str(mat_id), None)
+                        if youngmodulus_value is None:
+                            logging.info(f"youngmodulus_value id({mat_id}) has already fixed.")
+                        else:
+                            youngmodulus_formatted = format_float_youngmodulus(youngmodulus_value)
+                            line = (
+                                format_field_left('MAT1', 8) +
+                                format_field_right(mat_id, 8) +
+                                format_field_right(youngmodulus_formatted, 8) +
+                                line_strip[24:] +
+                                '\n'
+                            )
             # if line.startswith('CQUAD4'):
             if line.startswith('CQUAD4') or line.startswith('CTRIA3'):
                 if same_pshell_flag == 2:
@@ -880,23 +940,19 @@ if __name__ == '__main__':
     if b_is_set_sys_argv_on_program:
             sys.argv = [
                 "cae_optimize_nastran.py", 
-                "C:\\work\\github\\q-annealing-d-wave-test\\check1.dat",
-                "C:\\work\\github\\q-annealing-d-wave-test\\check1.f06",
-                "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_info.log",
+                "C:\\work\\github\\q-annealing-d-wave-test\\check.dat",
+                "C:\\work\\github\\q-annealing-d-wave-test\\check.f06",
+                "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_vscode_debug.log",
                 "C:\\MSC.Software\\MSC_Nastran\\20122\\bin\\nastranw.exe",
-                0.5,  ### target_density
+                0.6,  ### target_density
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 5,    ### cost_lambda
                 2,   ### loop_num
-                1,    ### start_phase_num
+                2,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
-                "proxy",
-                "name",
-                "name",
-                300   ### nastran_max_wait_time
             ]
     setup_logging(sys.argv[3])
     logging.info("\n\n")
