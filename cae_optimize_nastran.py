@@ -4,7 +4,7 @@ flag_data_list = [True, False, True, True]
 # nastranがない場合のデバッグ時は下記
 # flag_data_list = [False, True, False, False]
 # flag_data_list = [False, False, False, False]
-# flag_data_list = [True, False, True, False]
+# flag_data_list = [True, True, True, False]
 
 import logging
 # LOG_LEVELS = {
@@ -528,11 +528,16 @@ def main2(phase_num):
     pshell_dict = {}
     mat1_dict = {}
     cquad4_ctria3_dict = {}
+    force_grid_list = []
     all_node_id_set = set()
     with open(input_dat_file_name, 'r', encoding='utf-8') as file:
         for line in file:
             if line.startswith('$'):
                 continue
+            if line.startswith('FORCE'):
+                # 荷重がかかっている節点を含む要素を残す。最適化ファイルは、全てのFORCEカードが必ずPSHELLカードより先に出てくるためこの順序で良い
+                force_grid_id = int(line[16:24].strip())
+                force_grid_list.append(force_grid_id)
             if line.startswith('GRID'):
                 # フォーマットは8カラムで固定長（8文字ずつ）なので、それに基づいてフィールドを取得
                 grid_id = int(line[8:16].strip())
@@ -569,7 +574,18 @@ def main2(phase_num):
                         value = [x1, x2, x3, x4]
                     if line.startswith('CTRIA3'):
                         value = [x1, x2, x3]
-                    cquad4_ctria3_dict[elem_id] = value
+                    b_is_remain_elem_forcely = False
+                    for x in value:
+                        count = force_grid_list.count(x)
+                        if count > 0:
+                            logging.debug(f"要素{elem_id}は節点{x}を持ち、この節点はFORCEカードで荷重がかかっているため、最適化の対象から外します（残すことは確定）。")
+                            b_is_remain_elem_forcely = True
+                            break
+                    if b_is_remain_elem_forcely:
+                        del pshell_dict[elem_id]
+                        del mat1_dict[elem_id]
+                    else:
+                        cquad4_ctria3_dict[elem_id] = value
 
     input_f06_file_name = "{}_phase_{}.f06".format(str(f06_file_path)[:-4], phase_num - 1)
     if phase_num == 1:
@@ -864,8 +880,8 @@ if __name__ == '__main__':
     if b_is_set_sys_argv_on_program:
             sys.argv = [
                 "cae_optimize_nastran.py", 
-                "C:\\work\\github\\q-annealing-d-wave-test\\test01.dat",
-                "C:\\work\\github\\q-annealing-d-wave-test\\test01.f06",
+                "C:\\work\\github\\q-annealing-d-wave-test\\check1.dat",
+                "C:\\work\\github\\q-annealing-d-wave-test\\check1.f06",
                 "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_info.log",
                 "C:\\MSC.Software\\MSC_Nastran\\20122\\bin\\nastranw.exe",
                 0.5,  ### target_density
@@ -873,7 +889,7 @@ if __name__ == '__main__':
                 2.0,  ### density_power
                 5,    ### cost_lambda
                 2,   ### loop_num
-                2,    ### start_phase_num
+                1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
