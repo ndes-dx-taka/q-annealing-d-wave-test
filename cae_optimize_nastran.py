@@ -228,7 +228,7 @@ def rename_old_filename(original_file_name):
     rename_file(original_file_name, old_filename)
     return
 
-def process_first_phase_zero_nastran_file(input_file_path, output_file_path):
+def create_first_phase_zero_nastran_file(input_file_path, output_file_path):
     cquad4_ctria3_cards_dict = {}
     pshell_card_dict = {}
     mat1_card_dict = {}
@@ -266,11 +266,18 @@ def process_first_phase_zero_nastran_file(input_file_path, output_file_path):
         mat_id = pshell_mat1_id_dict[pshell_id]
         pshell_card = pshell_card_dict[pshell_id]
         mat1_card = mat1_card_dict[mat_id]
+        thickness = float(pshell_card[24:32].strip())
+        bending_rigidity_str = pshell_card[40:48].strip()
+        bending_rigidity = "" if bending_rigidity_str == "" else float(bending_rigidity_str)
         new_pshell = (
             format_field_left('PSHELL', 8) +
             format_field_right(cquad4_ctria3_id, 8) +
             format_field_right(cquad4_ctria3_id, 8) +
-            pshell_card[24:]
+            format_field_right(thickness, 8) +
+            format_field_right(cquad4_ctria3_id, 8) +
+            format_field_right(bending_rigidity, 8) +
+            format_field_right(cquad4_ctria3_id, 8) +
+            pshell_card[56:]
         )
         new_mat1 = (
             format_field_left('MAT1', 8) +
@@ -295,7 +302,6 @@ def process_first_phase_zero_nastran_file(input_file_path, output_file_path):
         new_content.append(new_cquad4_ctria3)
 
         youngsmodulus = float(mat1_card[16:24].strip())
-        thickness = float(pshell_card[24:32].strip())
         b_use_thickness = om.get_from_flag_data_list(4)
         om.add_to_thickness_youngsmodulus_data_dict(cquad4_ctria3_id, (thickness if b_use_thickness else youngsmodulus))
 
@@ -405,7 +411,10 @@ def extract_stress_values(filename):
             stress_part_2 = normal_x1 * normal_y1 + normal_x2 * normal_y2
             stress_part_3 = shear_xy1 + shear_xy2
 
-            stress_data[element_id] = (stress_part_1, stress_part_2, stress_part_3)
+            von_mises_1 = float(line[117:131].strip())
+            von_mises_2 = float(next_line[117:131].strip())
+
+            stress_data[element_id] = (stress_part_1, stress_part_2, stress_part_3, max(von_mises_1, von_mises_2))
 
     logging.debug(f"{filename}における、辞書stress_dataのデータ内容:\n" + pprint.pformat(stress_data, indent=4))
 
@@ -420,11 +429,11 @@ def check_skip_optimize(thickness_youngmodulus, initial_thickness_youngmodulus, 
 
 def calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness):
     if b_use_thickness:
-        if initial_thickness_youngsmodulus == 0:
+        if abs(initial_thickness_youngsmodulus) <= 1e-6:
             raise ValueError("thickness must be non-zero.")
         return (thickness_youngmodulus / initial_thickness_youngsmodulus)
     else:
-        if initial_thickness_youngsmodulus == 0:
+        if abs(initial_thickness_youngsmodulus) <= 1e-6:
             raise ValueError("E_0 must be non-zero.")
         return (thickness_youngmodulus / initial_thickness_youngsmodulus) ** (1 / density_power)
 
@@ -531,7 +540,7 @@ def main2(phase_num):
 
     input_dat_file_name = "{}_phase_{}.dat".format(str(dat_file_path)[:-4], phase_num - 1)
     if phase_num == 1:
-        process_first_phase_zero_nastran_file(dat_file_path, input_dat_file_name)
+        create_first_phase_zero_nastran_file(dat_file_path, input_dat_file_name)
 
     logging.info(f"解析に使用した入力ファイル名：{input_dat_file_name}")
     print(f"解析に使用した入力ファイル名：{input_dat_file_name}")
@@ -616,28 +625,36 @@ def main2(phase_num):
     stress_dict = extract_stress_values(input_f06_file_name)
 
     merged_elem_list = []
+    upper_limit_of_stress = float(sys.argv[14])
     for pshell_key, value in pshell_dict.items():
         eid = pshell_key
+        stress_value = stress_dict[eid]
+        von_mises = stress_value[3]
+        if von_mises > upper_limit_of_stress:
+            logging.info(f"eid={eid}の要素のvon mises応力値{von_mises}が、基準値として指定した{upper_limit_of_stress}を超えたためにこの要素の最適化をスキップします。")
+            continue
+
+        thickness = value[1]
+        if b_use_thickness:
+            initial_thickness_check = om.get_from_thickness_youngsmodulus_data_dict(eid)
+            if abs(initial_thickness_check) <= 1e-6:
+                if (thickness / initial_thickness_check) < (decide_val_threshold + threshold):
+                    continue
+
         merged_dict = {}
         merged_dict['eid'] = eid
+    
+        merged_dict['stress_part_1'] = stress_value[0]
+        merged_dict['stress_part_2'] = stress_value[1]
+        merged_dict['stress_part_3'] = stress_value[2]
+        merged_dict['von_mises'] = von_mises
+
         cquad4_ctria3_value = cquad4_ctria3_dict[eid]
         merged_dict['nodes'] = cquad4_ctria3_value
         mat1_value = mat1_dict[value[0]]
-        thickness = value[1]
         merged_dict['thickness'] = thickness
         merged_dict['youngsmodulus'] = mat1_value[0]
         merged_dict['poissonratio'] = mat1_value[1]
-        try:
-            stress_value = stress_dict[eid]
-            merged_dict['stress_part_1'] = stress_value[0]
-            merged_dict['stress_part_2'] = stress_value[1]
-            merged_dict['stress_part_3'] = stress_value[2]
-        except KeyError:
-            print(f"KeyError: The key '{eid}' was not found in the dictionary.")
-            raise
-        except Exception as e:
-            print(f"An error occurred with eid '{eid}': {e}")
-            raise
 
         node_data = []
         for nid in cquad4_ctria3_value:
@@ -813,8 +830,9 @@ def main2(phase_num):
         if dens_value >= (1.0 - decide_val_threshold - threshold):
             dens_value = 1.0
         if dens_value <= (decide_val_threshold + threshold):
-            zero_fix_density_index_list.append(int(eid))
-            b_use_thickness_youngmodulus = False
+            if not b_use_thickness:
+                zero_fix_density_index_list.append(int(eid))
+                b_use_thickness_youngmodulus = False
 
         if b_use_thickness_youngmodulus == True:
             if b_use_thickness:
@@ -944,15 +962,16 @@ if __name__ == '__main__':
                 "C:\\work\\github\\q-annealing-d-wave-test\\check.f06",
                 "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_vscode_debug.log",
                 "C:\\MSC.Software\\MSC_Nastran\\20122\\bin\\nastranw.exe",
-                0.6,  ### target_density
+                0.5,  ### target_density
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 5,    ### cost_lambda
-                2,   ### loop_num
-                2,    ### start_phase_num
+                15,   ### loop_num
+                1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
+                20,  ### upper_limit_of_stress
             ]
     setup_logging(sys.argv[3])
     logging.info("\n\n")
