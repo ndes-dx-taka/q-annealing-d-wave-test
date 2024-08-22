@@ -5,7 +5,7 @@ flag_data_list = [True, False, True, True, True]
 # flag_data_list = [True, True, False, False]
 # flag_data_list = [True, False, False, False]
 # 現在使用中
-# flag_data_list = [False, True, True, False, True]
+flag_data_list = [False, False, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -52,7 +52,7 @@ def format_float_thickness(value):
 class OptimizeManager:
     def __init__(self, flag_data_list=None, thickness_youngsmodulus_data_dict=None):
         if flag_data_list is None:
-            logging.info("Please set initial_condition_data_dict")
+            logging.warning("Please set initial_condition_data_dict")
             flag_data_list = []
         if thickness_youngsmodulus_data_dict is None:
             thickness_youngsmodulus_data_dict = {}
@@ -100,22 +100,22 @@ def rename_file(original_file_path, new_file_path):
         os.rename(original_file_path, new_file_path)
         logging.info(f"ファイルが {original_file_path} から {new_file_path} にリネームされました。")
     except FileNotFoundError:
-        logging.info(f"ファイル {original_file_path} が見つかりません。")
+        logging.warning(f"ファイル {original_file_path} が見つかりません。")
     except PermissionError:
-        logging.info(f"ファイル {original_file_path} に対するアクセスが拒否されました。")
+        logging.warning(f"ファイル {original_file_path} に対するアクセスが拒否されました。")
     except Exception as e:
-        logging.info(f"エラーが発生しました: {e}")
+        logging.error(f"エラーが発生しました: {e}")
 
 def delete_file(file_path):
     try:
         os.remove(file_path)
         logging.info(f"ファイル {file_path} が削除されました。")
     except FileNotFoundError:
-        logging.info(f"ファイル {file_path} が見つかりません。")
+        logging.warning(f"ファイル {file_path} が見つかりません。")
     except PermissionError:
-        logging.info(f"ファイル {file_path} に対するアクセスが拒否されました。")
+        logging.warning(f"ファイル {file_path} に対するアクセスが拒否されました。")
     except Exception as e:
-        logging.info(f"エラーが発生しました: {e}")
+        logging.error(f"エラーが発生しました: {e}")
 
 def calculate_area(vertices):
     if len(vertices) == 3:
@@ -150,7 +150,7 @@ def increment_phase_number(filename):
         incremented_number = original_number + 1
         new_filename = filename.replace(f'phase_{original_number}', f'phase_{incremented_number}')
     else:
-        logging.info("dat file name is maybe wrong. (increment_phase_number)")
+        logging.error("datファイルの名前が間違っている可能性があります. (関数：increment_phase_number)")
     return new_filename
 
 def get_file_content(file_path):
@@ -161,10 +161,10 @@ def get_file_content(file_path):
         try:
             with open(file_path, 'r', encoding=encoding) as file:
                 content = file.readlines()
-            logging.info(f"File successfully read with encoding: {encoding}")
+            logging.debug(f"File successfully read with encoding: {encoding}")
             break
         except UnicodeDecodeError:
-            logging.info(f"Failed to read file with encoding: {encoding}")
+            logging.debug(f"Failed to read file with encoding: {encoding}")
             continue
     else:
         # 全てのエンコーディングで失敗した場合
@@ -427,13 +427,13 @@ def check_skip_optimize(thickness_youngmodulus, initial_thickness_youngmodulus, 
         return True
     return False
 
-def calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness):
+def calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness, threshold):
     if b_use_thickness:
-        if abs(initial_thickness_youngsmodulus) <= 1e-6:
+        if initial_thickness_youngsmodulus <= threshold:
             raise ValueError("thickness must be non-zero.")
         return (thickness_youngmodulus / initial_thickness_youngsmodulus)
     else:
-        if abs(initial_thickness_youngsmodulus) <= 1e-6:
+        if initial_thickness_youngsmodulus <= threshold:
             raise ValueError("E_0 must be non-zero.")
         return (thickness_youngmodulus / initial_thickness_youngsmodulus) ** (1 / density_power)
 
@@ -487,7 +487,7 @@ def run_nastran(dat_file_name, nastran_exe_path):
         logging.info(f"Nastranの実行がリターンコード{result.returncode}で終了しました。")
         print(f"Nastranの実行がリターンコード{result.returncode}で終了しました。")
     except CustomError as e:
-        logging.info(f"Nastranの実行で異常が発生しました。: {e}")
+        logging.error(f"Nastranの実行で異常が発生しました。: {e}")
         print(f"Nastranの実行で異常が発生しました。: {e}")
         return 1
     except subprocess.CalledProcessError as e:
@@ -631,13 +631,13 @@ def main2(phase_num):
         stress_value = stress_dict[eid]
         von_mises = stress_value[3]
         if von_mises > upper_limit_of_stress:
-            logging.info(f"eid={eid}の要素のvon mises応力値{von_mises}が、基準値として指定した{upper_limit_of_stress}を超えたためにこの要素の最適化をスキップします。")
+            logging.debug(f"eid={eid}の要素のvon mises応力値{von_mises}が、基準値として指定した{upper_limit_of_stress}を超えたためにこの要素の最適化をスキップします。")
             continue
 
         thickness = value[1]
         if b_use_thickness:
             initial_thickness_check = om.get_from_thickness_youngsmodulus_data_dict(eid)
-            if abs(initial_thickness_check) <= 1e-6:
+            if initial_thickness_check >= threshold:
                 if (thickness / initial_thickness_check) < (decide_val_threshold + threshold):
                     continue
 
@@ -706,7 +706,7 @@ def main2(phase_num):
             thickness_density_percentage_now = first_thickness_density_percentage
         else:
             thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
-            thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness)
+            thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness, threshold)
 
         density_plus_delta = thickness_density_percentage_now + density_increment
         density_minus_delta = thickness_density_percentage_now - density_increment
@@ -744,7 +744,7 @@ def main2(phase_num):
             thickness_density_percentage_now = first_thickness_density_percentage
         else:
             thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
-            thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness)
+            thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness, threshold)
 
         density_plus_delta = thickness_density_percentage_now + density_increment
         density_minus_delta = thickness_density_percentage_now - density_increment
@@ -815,7 +815,7 @@ def main2(phase_num):
         initial_thickness_youngsmodulus = om.get_from_thickness_youngsmodulus_data_dict(eid)
         if not phase_num == 1:
             thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
-            dens_value_old = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness)
+            dens_value_old = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness, threshold)
         ising_index = ising_index_eid_map[eid]
         ising_value = ising_index_dict[ising_index]
         dens_value = dens_value_old + density_increment * ising_value
@@ -859,7 +859,7 @@ def main2(phase_num):
                         line_strip = line.strip()
                         thickness_value = mat_thickness_youngmodulus.get(str(elem_id), None)
                         if thickness_value is None:
-                            logging.info(f"thickness_value id({elem_id}) has already fixed.")
+                            logging.debug(f"thickness_value id({elem_id}) has already fixed.")
                         else:
                             thickness_formatted = format_float_thickness(thickness_value)
                             line = (
@@ -881,7 +881,7 @@ def main2(phase_num):
                     if not b_use_thickness:
                         youngmodulus_value = mat_thickness_youngmodulus.get(str(mat_id), None)
                         if youngmodulus_value is None:
-                            logging.info(f"youngmodulus_value id({mat_id}) has already fixed.")
+                            logging.debug(f"youngmodulus_value id({mat_id}) has already fixed.")
                         else:
                             youngmodulus_formatted = format_float_youngmodulus(youngmodulus_value)
                             line = (
