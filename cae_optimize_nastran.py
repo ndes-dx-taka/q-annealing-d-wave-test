@@ -1,11 +1,8 @@
-# flag_data_listの説明：[b_do_optimize, b_is_set_sys_argv_on_program, b_erase_temp_file, b_do_nastran, b_use_thickness]
+# flag_data_listの説明：[b_do_optimize, b_is_set_sys_argv_on_program, b_erase_temp_file, b_do_nastran, b_for_debug]
 # 開発ネットワークでの連続実行では下記。
-flag_data_list = [True, False, True, True, True]
+flag_data_list = [True, False, True, True, False]
 # nastranがない場合のデバッグ時は下記
-# flag_data_list = [True, True, False, False]
-# flag_data_list = [True, False, False, False]
-# 現在使用中
-flag_data_list = [False, False, True, False, True]
+flag_data_list = [False, True, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -58,6 +55,7 @@ class OptimizeManager:
             thickness_youngsmodulus_data_dict = {}
         self._flag_data_list = flag_data_list
         self._thickness_youngsmodulus_data_dict = thickness_youngsmodulus_data_dict
+        self._is_solid = False
     
     def get_from_flag_data_list(self, index):
         return self._flag_data_list[index]
@@ -72,8 +70,11 @@ class OptimizeManager:
         with open(csvpath, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
 
+            solid_flag = ("1" if self._is_solid else "0")
+            writer.writerow(["Solid_flag", solid_flag])
+
             for key, value in self._thickness_youngsmodulus_data_dict.items():
-                b_thickness = self.get_from_flag_data_list(4)
+                b_thickness = False if str(sys.argv[15]) == "0" else True
                 value_format = format_float_thickness(value) if b_thickness else format_float_youngmodulus(value)
                 writer.writerow([key, str(value_format)])
 
@@ -85,10 +86,19 @@ class OptimizeManager:
                 for row in reader:
                     if len(row) == 2:
                         key, value = row
-                        self._thickness_youngsmodulus_data_dict[int(key)] = float(value)
+                        if str(key) == "Solid_flag":
+                            self._is_solid = True
+                        else:
+                            self._thickness_youngsmodulus_data_dict[int(key)] = float(value)
             logging.info(f"Data loaded from {csvpath} into _thickness_youngsmodulus_data_dict.")
         else:
             logging.info("_thickness_youngsmodulus_data_dict is not empty, skipping load.")
+
+    def is_solid(self):
+        return self._is_solid
+    
+    def set_to_solid(self):
+        self._is_solid = True
 
 om = OptimizeManager(flag_data_list)
 
@@ -141,6 +151,39 @@ def calculate_quadrilateral_area(vertices):
     area = 0.5 * abs(sum(x1 * y2 - x2 * y1 for x1, y1, x2, y2 in zip(x_coords, y_coords, x_coords[1:] + x_coords[:1], y_coords[1:] + y_coords[:1])))
     return area
 
+def calc_tetrahedron_volume(vertices):
+    x1, y1, z1 = vertices[0]['x'], vertices[0]['y'], vertices[0]['z']
+    x2, y2, z2 = vertices[1]['x'], vertices[1]['y'], vertices[1]['z']
+    x3, y3, z3 = vertices[2]['x'], vertices[2]['y'], vertices[2]['z']
+    x4, y4, z4 = vertices[3]['x'], vertices[3]['y'], vertices[3]['z']
+    
+    a = np.array([x2 - x1, y2 - y1, z2 - z1])
+    b = np.array([x3 - x1, y3 - y1, z3 - z1])
+    c = np.array([x4 - x1, y4 - y1, z4 - z1])
+    
+    M = np.array([a, b, c])
+    
+    det_M = np.linalg.det(M)
+    
+    volume = abs(det_M) / 6.0
+    
+    return volume
+
+def create_D_inverse(poissonratio, youngmodulus):
+    nu = poissonratio
+    D_inv = np.array([
+        [1,  -nu, -nu,  0,            0,            0],
+        [-nu,  1, -nu,  0,            0,            0],
+        [-nu, -nu,  1,  0,            0,            0],
+        [0,    0,   0,  2*(1+nu),     0,            0],
+        [0,    0,   0,  0,        2*(1+nu),         0],
+        [0,    0,   0,  0,            0,        2*(1+nu)]
+    ])
+
+    D_inv = D_inv / youngmodulus
+    
+    return D_inv
+
 def increment_phase_number(filename):
     match = re.search(r'phase_(\d+)\.dat', filename)
     
@@ -185,7 +228,12 @@ def safe_int_conv(sub_value):
 
 def safe_float_conv(sub_value):
     if sub_value:
-        return float(sub_value)
+        pattern = r'(-?\d+\.\d+)-(\d+)'
+        if re.search(pattern, sub_value):
+            sub_value_conv = re.sub(pattern, r'\1E-\2', sub_value)
+            return float(sub_value_conv)
+        else:
+            return float(sub_value)
     else:
         return ""
     
@@ -229,81 +277,97 @@ def rename_old_filename(original_file_name):
     return
 
 def create_first_phase_zero_nastran_file(input_file_path, output_file_path):
-    cquad4_ctria3_cards_dict = {}
-    pshell_card_dict = {}
+    ctetra_cquad4_ctria3_cards_dict = {}
+    psolid_pshell_card_dict = {}
     mat1_card_dict = {}
-    cquad4_ctria3_pshell_id_dict = {}
-    pshell_mat1_id_dict = {}
-    elem_type_dict = {}  # CQUAD4: 0,  CTRIA3: 1
+    ctetra_cquad4_ctria3_psolid_pshell_id_dict = {}
+    psolid_pshell_mat1_id_dict = {}
+    elem_type_dict = {}  # CQUAD4: 0,  CTRIA3: 1,  CTETRA: 2
 
     base_name, ext = os.path.splitext(input_file_path)
 
     content = get_file_content(input_file_path)
 
     for line in content:
-        if line.startswith('CQUAD4') or line.startswith('CTRIA3'):
-            cquad4_ctria3_id = int(line[8:16].strip())
-            pshell_id = int(line[16:24].strip())
-            cquad4_ctria3_cards_dict[cquad4_ctria3_id] = line.strip()
-            cquad4_ctria3_pshell_id_dict[cquad4_ctria3_id] = pshell_id
+        if line.startswith('CTETRA') or line.startswith('CQUAD4') or line.startswith('CTRIA3'):
+            ctetra_cquad4_ctria3_id = int(line[8:16].strip())
+            psolid_pshell_id = int(line[16:24].strip())
+            ctetra_cquad4_ctria3_cards_dict[ctetra_cquad4_ctria3_id] = line.strip()
+            ctetra_cquad4_ctria3_psolid_pshell_id_dict[ctetra_cquad4_ctria3_id] = psolid_pshell_id
             if line.startswith('CQUAD4'):
-                elem_type_dict[cquad4_ctria3_id] = int(0)
+                elem_type_dict[ctetra_cquad4_ctria3_id] = int(0)
             if line.startswith('CTRIA3'):
-                elem_type_dict[cquad4_ctria3_id] = int(1)
-        elif line.startswith('PSHELL'):
-            pshell_id = int(line[8:16].strip())
+                elem_type_dict[ctetra_cquad4_ctria3_id] = int(1)
+            if line.startswith('CTETRA'):
+                elem_type_dict[ctetra_cquad4_ctria3_id] = int(2)
+        elif line.startswith('PSOLID') or line.startswith('PSHELL'):
+            psolid_pshell_id = int(line[8:16].strip())
             mat_id = int(line[16:24].strip())
-            pshell_mat1_id_dict[pshell_id] = mat_id
-            pshell_card_dict[pshell_id] = line.strip()
+            psolid_pshell_mat1_id_dict[psolid_pshell_id] = mat_id
+            psolid_pshell_card_dict[psolid_pshell_id] = line.strip()
+            if line.startswith('PSOLID'):
+                om.set_to_solid()
         elif line.startswith('MAT1'):
             mat_id = int(line[8:16].strip())
             mat1_card_dict[mat_id] = line.strip()
 
     new_content = []
 
-    for cquad4_ctria3_id, cquad4_ctria3_card in cquad4_ctria3_cards_dict.items():
-        pshell_id = cquad4_ctria3_pshell_id_dict[cquad4_ctria3_id]
-        mat_id = pshell_mat1_id_dict[pshell_id]
-        pshell_card = pshell_card_dict[pshell_id]
+    for ctetra_cquad4_ctria3_id, ctetra_cquad4_ctria3_card in ctetra_cquad4_ctria3_cards_dict.items():
+        elem_type_id = elem_type_dict[ctetra_cquad4_ctria3_id]
+        psolid_pshell_id = ctetra_cquad4_ctria3_psolid_pshell_id_dict[ctetra_cquad4_ctria3_id]
+        mat_id = psolid_pshell_mat1_id_dict[psolid_pshell_id]
+        psolid_pshell_card = psolid_pshell_card_dict[psolid_pshell_id]
         mat1_card = mat1_card_dict[mat_id]
-        thickness = float(pshell_card[24:32].strip())
-        bending_rigidity_str = pshell_card[40:48].strip()
-        bending_rigidity = "" if bending_rigidity_str == "" else float(bending_rigidity_str)
-        new_pshell = (
-            format_field_left('PSHELL', 8) +
-            format_field_right(cquad4_ctria3_id, 8) +
-            format_field_right(cquad4_ctria3_id, 8) +
-            format_field_right(thickness, 8) +
-            format_field_right(cquad4_ctria3_id, 8) +
-            format_field_right(bending_rigidity, 8) +
-            format_field_right(cquad4_ctria3_id, 8) +
-            pshell_card[56:]
-        )
+        new_elem = None
+        thickness = None
+        if elem_type_id == 0 or elem_type_id == 1:
+            thickness = safe_float_conv(psolid_pshell_card[24:32].strip())
+            bending_rigidity_str = psolid_pshell_card[40:48].strip()
+            bending_rigidity = "" if bending_rigidity_str == "" else safe_float_conv(bending_rigidity_str)
+            new_elem = (
+                format_field_left('PSHELL', 8) +
+                format_field_right(ctetra_cquad4_ctria3_id, 8) +
+                format_field_right(ctetra_cquad4_ctria3_id, 8) +
+                format_field_right(thickness, 8) +
+                format_field_right(ctetra_cquad4_ctria3_id, 8) +
+                format_field_right(bending_rigidity, 8) +
+                format_field_right(ctetra_cquad4_ctria3_id, 8) +
+                psolid_pshell_card[56:]
+            )
+        if elem_type_id == 2:
+            new_elem = (
+                format_field_left('PSOLID', 8) +
+                format_field_right(ctetra_cquad4_ctria3_id, 8) +
+                format_field_right(ctetra_cquad4_ctria3_id, 8) +
+                psolid_pshell_card[24:]
+            )
         new_mat1 = (
             format_field_left('MAT1', 8) +
-            format_field_right(cquad4_ctria3_id, 8) +
+            format_field_right(ctetra_cquad4_ctria3_id, 8) +
             mat1_card[16:]
         )
-        elem_type_id = elem_type_dict[cquad4_ctria3_id]
         elem_type_str = None
         if elem_type_id == 0:
             elem_type_str = 'CQUAD4'
         if elem_type_id == 1:
             elem_type_str = 'CTRIA3'
-        new_cquad4_ctria3 = (
+        if elem_type_id == 2:
+            elem_type_str = 'CTETRA'
+        new_ctetra_cquad4_ctria3 = (
             format_field_left(elem_type_str, 8) +
-            format_field_right(cquad4_ctria3_id, 8) +
-            format_field_right(cquad4_ctria3_id, 8) +
-            cquad4_ctria3_card[24:]
+            format_field_right(ctetra_cquad4_ctria3_id, 8) +
+            format_field_right(ctetra_cquad4_ctria3_id, 8) +
+            ctetra_cquad4_ctria3_card[24:]
         )
 
-        new_content.append(new_pshell)
+        new_content.append(new_elem)
         new_content.append(new_mat1)
-        new_content.append(new_cquad4_ctria3)
+        new_content.append(new_ctetra_cquad4_ctria3)
 
-        youngsmodulus = float(mat1_card[16:24].strip())
-        b_use_thickness = om.get_from_flag_data_list(4)
-        om.add_to_thickness_youngsmodulus_data_dict(cquad4_ctria3_id, (thickness if b_use_thickness else youngsmodulus))
+        youngsmodulus = safe_float_conv(mat1_card[16:24].strip())
+        b_use_thickness = False if str(sys.argv[15]) == "0" else True
+        om.add_to_thickness_youngsmodulus_data_dict(ctetra_cquad4_ctria3_id, (thickness if b_use_thickness else youngsmodulus))
 
     reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
     rename_old_filename(reserve_data_csv)
@@ -312,43 +376,45 @@ def create_first_phase_zero_nastran_file(input_file_path, output_file_path):
     rename_old_filename(output_file_path)
     with open(output_file_path, 'w', encoding='utf-8') as file:
         for line in content:
-            if not line.startswith(('CQUAD4', 'CTRIA3', 'PSHELL', 'MAT1', 'ENDDATA')):
+            if not line.startswith(('CTETRA', 'CQUAD4', 'CTRIA3', 'PSOLID', 'PSHELL', 'MAT1', 'ENDDATA')):
                 file.write(line)
         for line in new_content:
             file.write(line + '\n')
         file.write("ENDDATA\n")
 
-    pshell_cquad4_ctria3_id_dict = {}
-    mat1_cquad4_ctria3_id_dict = {}
-    for cquad4_ctria3_id, pshell_id in cquad4_ctria3_pshell_id_dict.items():
-        if pshell_id in pshell_cquad4_ctria3_id_dict:
-            pshell_cquad4_ctria3_id_dict[pshell_id].append(cquad4_ctria3_id)
-            mat_id = pshell_mat1_id_dict[pshell_id]
-            if mat_id in mat1_cquad4_ctria3_id_dict:
-                mat1_cquad4_ctria3_id_dict[mat_id].append(cquad4_ctria3_id)
+    # マテリアル重複対応
+    psolid_pshell_ctetra_cquad4_ctria3_id_dict = {}
+    mat1_ctetra_cquad4_ctria3_id_dict = {}
+    for ctetra_cquad4_ctria3_id, psolid_pshell_id in ctetra_cquad4_ctria3_psolid_pshell_id_dict.items():
+        if psolid_pshell_id in psolid_pshell_ctetra_cquad4_ctria3_id_dict:
+            psolid_pshell_ctetra_cquad4_ctria3_id_dict[psolid_pshell_id].append(ctetra_cquad4_ctria3_id)
+            mat_id = psolid_pshell_mat1_id_dict[psolid_pshell_id]
+            if mat_id in mat1_ctetra_cquad4_ctria3_id_dict:
+                mat1_ctetra_cquad4_ctria3_id_dict[mat_id].append(ctetra_cquad4_ctria3_id)
             else:
                 new_list = []
-                new_list.append(cquad4_ctria3_id)
-                mat1_cquad4_ctria3_id_dict[pshell_id] = new_list
+                new_list.append(ctetra_cquad4_ctria3_id)
+                mat1_ctetra_cquad4_ctria3_id_dict[psolid_pshell_id] = new_list
         else:
             new_list = []
-            new_list.append(cquad4_ctria3_id)
-            pshell_cquad4_ctria3_id_dict[pshell_id] = new_list
-            mat_id = pshell_mat1_id_dict[pshell_id]
-            if mat_id in mat1_cquad4_ctria3_id_dict:
-                mat1_cquad4_ctria3_id_dict[mat_id].append(cquad4_ctria3_id)
+            new_list.append(ctetra_cquad4_ctria3_id)
+            psolid_pshell_ctetra_cquad4_ctria3_id_dict[psolid_pshell_id] = new_list
+            mat_id = psolid_pshell_mat1_id_dict[psolid_pshell_id]
+            if mat_id in mat1_ctetra_cquad4_ctria3_id_dict:
+                mat1_ctetra_cquad4_ctria3_id_dict[mat_id].append(ctetra_cquad4_ctria3_id)
             else:
                 new_list = []
-                new_list.append(cquad4_ctria3_id)
-                mat1_cquad4_ctria3_id_dict[pshell_id] = new_list
+                new_list.append(ctetra_cquad4_ctria3_id)
+                mat1_ctetra_cquad4_ctria3_id_dict[psolid_pshell_id] = new_list
 
     output_csv = base_name + '.csv'
     rename_old_filename(output_csv)
     with open(output_csv, mode='w', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow(['PSHELL information'])
-        for key, value in pshell_card_dict.items():
-            writer.writerow([key,
+        writer.writerow(['PSOLID/PSHELL information'])
+        for key, value in psolid_pshell_card_dict.items():
+            writer.writerow([value[0:8].strip(),
+                             key,
                              safe_int_conv(value[16:24].strip()),
                              safe_float_conv(value[24:32].strip()),
                              safe_int_conv(value[32:40].strip())]
@@ -365,13 +431,13 @@ def create_first_phase_zero_nastran_file(input_file_path, output_file_path):
                              safe_float_conv(value[56:64].strip())]
                              )
         writer.writerow([])
-        writer.writerow(['Elements number corresponding to PSHELL'])
-        for pshell_id, elements in pshell_cquad4_ctria3_id_dict.items():
+        writer.writerow(['Elements number corresponding to PSOLID/PSHELL'])
+        for psolid_pshell_id, elements in psolid_pshell_ctetra_cquad4_ctria3_id_dict.items():
             grouped_elements = 'group : ' + group_elements_for_csv(elements)
-            writer.writerow([pshell_id, grouped_elements])
+            writer.writerow([psolid_pshell_id, grouped_elements])
         writer.writerow([])
         writer.writerow(['Elements number corresponding to MAT1'])
-        for mat1_id, elements in mat1_cquad4_ctria3_id_dict.items():
+        for mat1_id, elements in mat1_ctetra_cquad4_ctria3_id_dict.items():
             grouped_elements = 'group : ' + group_elements_for_csv(elements)
             writer.writerow([mat1_id, grouped_elements])
         
@@ -380,7 +446,10 @@ def extract_stress_values(filename):
     lines = get_file_content(filename)
 
     stress_data = {}
-    start_reading = False
+    start_reading_pshell = False
+    start_reading_ctetra = False
+    ctetra_element_id = 0
+    ctetra_active = False # 「0GRID CS  4 GP」の次の行が要素番号が書いてある
 
     for i in range(len(lines) - 1):
         line = lines[i]
@@ -388,35 +457,58 @@ def extract_stress_values(filename):
 
         if (re.search(r'S T R E S S E S\s+I N\s+Q U A D R I L A T E R A L\s+E L E M E N T S\s+\( Q U A D 4 \)', line) or
             re.search(r'S T R E S S E S\s+I N\s+T R I A N G U L A R\s+E L E M E N T S\s+\( T R I A 3 \)', line)):
-            start_reading = True
+            start_reading_pshell = True
+            continue
+
+        if (re.search(r'S T R E S S E S\s+I N\s+T E T R A H E D R O N   S O L I D\s+E L E M E N T S\s+\( C T E T R A \)', line)):
+            start_reading_ctetra = True
             continue
         
         # if re.search(r'MSC NASTRAN.+PAGE.+', line):
         if re.search(r'.+MSC.NASTRAN.+PAGE.+', line):
-            start_reading = False
+            start_reading_pshell = False
+            start_reading_ctetra = False
         
         # if start_reading and re.match(r'^\s*\d+\s+', line):
-        if start_reading and re.match(r'^\s*0\d*\s+\d+\s+.*', line):
+        if start_reading_pshell and re.match(r'^\s*0\d*\s+\d+\s+.*', line):
             element_id = int(line[1:9].strip())
             
-            normal_x1 = float(line[26:43].strip())
-            normal_y1 = float(line[44:58].strip())
-            shear_xy1 = float(line[59:73].strip())
+            normal_x1 = safe_float_conv(line[26:43].strip())
+            normal_y1 = safe_float_conv(line[44:58].strip())
+            shear_xy1 = safe_float_conv(line[59:73].strip())
 
-            normal_x2 = float(next_line[26:43].strip())
-            normal_y2 = float(next_line[44:58].strip())
-            shear_xy2 = float(next_line[59:73].strip())
+            normal_x2 = safe_float_conv(next_line[26:43].strip())
+            normal_y2 = safe_float_conv(next_line[44:58].strip())
+            shear_xy2 = safe_float_conv(next_line[59:73].strip())
 
             stress_part_1 = (pow(normal_x1, 2.0) + pow(normal_y1, 2.0) + pow(normal_x2, 2.0) + pow(normal_y2, 2.0)) / 2.0
             stress_part_2 = normal_x1 * normal_y1 + normal_x2 * normal_y2
             stress_part_3 = shear_xy1 + shear_xy2
 
-            von_mises_1 = float(line[117:131].strip())
-            von_mises_2 = float(next_line[117:131].strip())
+            von_mises_1 = safe_float_conv(line[117:131].strip())
+            von_mises_2 = safe_float_conv(next_line[117:131].strip())
 
             stress_data[element_id] = (stress_part_1, stress_part_2, stress_part_3, max(von_mises_1, von_mises_2))
 
-    logging.debug(f"{filename}における、辞書stress_dataのデータ内容:\n" + pprint.pformat(stress_data, indent=4))
+        if start_reading_ctetra and re.match(r'.+0GRID\sCS.+GP.*', line):
+            ctetra_element_id = int(line[3:11].strip())
+            ctetra_active = True
+        
+        if start_reading_ctetra and ctetra_active and re.match(r'.+CENTER.+X.+XY.+', line):
+            ctetra_active = False
+            next_next_line = lines[i + 2]
+            normal_x = safe_float_conv(line[27:41].strip())
+            normal_y = safe_float_conv(next_line[27:41].strip())
+            normal_z = safe_float_conv(next_next_line[27:41].strip())
+            shear_xy = safe_float_conv(line[46:60].strip())
+            shear_yz = safe_float_conv(next_line[46:60].strip())
+            shear_zx = safe_float_conv(next_next_line[46:60].strip())
+            von_mises = safe_float_conv(line[114:129].strip())
+            stress_data[ctetra_element_id] = (normal_x, normal_y, normal_z, von_mises, shear_xy, shear_yz, shear_zx)
+
+    b_for_debug = om.get_from_flag_data_list(4)
+    if b_for_debug:
+        logging.debug(f"{filename}における、辞書stress_dataのデータ内容:\n" + pprint.pformat(stress_data, indent=4))
 
     return stress_data
 
@@ -496,6 +588,112 @@ def run_nastran(dat_file_name, nastran_exe_path):
         return 2
     return 0
 
+def calculate_ising_part(
+        elem, 
+        initial_thickness_youngsmodulus, 
+        volume, 
+        first_thickness_density_percentage, 
+        density_power_calc, 
+        density_increment,
+        phase_num, 
+        b_use_thickness,
+        is_solid_flag,
+        threshold,
+        return_value):
+    thickness = float(elem.get('thickness', 0))
+    youngsmodulus = float(elem.get('youngsmodulus', 0))
+
+    thickness_density_percentage_now = 0.0
+    if phase_num == 1:
+        thickness_density_percentage_now = first_thickness_density_percentage
+    else:
+        thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
+        thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power_calc, b_use_thickness, threshold)
+
+    density_plus_delta = thickness_density_percentage_now + density_increment
+    density_minus_delta = thickness_density_percentage_now - density_increment
+
+    alpha_value = pow(density_plus_delta, (1 - density_power_calc))
+    beta_value = pow(density_minus_delta, (1 - density_power_calc))
+
+    poissonratio = float(elem.get('poissonratio', 0))
+    youngmodulus_for_calculate = (youngsmodulus if b_use_thickness else initial_thickness_youngsmodulus)
+    energy_part = 0.0
+    if is_solid_flag:
+        normal_x = elem.get('normal_x', 0)
+        normal_y = elem.get('normal_y', 0)
+        normal_z = elem.get('normal_z', 0)
+        shear_xy = elem.get('shear_xy', 0)
+        shear_yz = elem.get('shear_yz', 0)
+        shear_zx = elem.get('shear_zx', 0)
+        # D{ε}={σ}よりひずみベクトル{ε}を計算し、{ε}^T{σ}を求める
+        D_inv_matrix = create_D_inverse(poissonratio, youngmodulus_for_calculate)
+        stress_vector = np.array([normal_x, normal_y, normal_z, shear_xy, shear_yz, shear_zx])
+        strain_vector = np.dot(D_inv_matrix, stress_vector)
+        energy_part = np.dot(strain_vector, stress_vector)
+    else:
+        stress_part_1 = elem.get('stress_part_1', 0)
+        stress_part_2 = elem.get('stress_part_2', 0)
+        stress_part_3 = elem.get('stress_part_3', 0)
+        energy_part = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) / youngmodulus_for_calculate
+
+    kappa_i = energy_part * volume
+
+    # 最適化計算用
+    return_value.append(alpha_value)
+    return_value.append(beta_value)
+    return_value.append(kappa_i)
+
+    # csv出力用
+    return_value.append(energy_part)
+    von_mises = float(elem.get('von_mises', 0))
+    return_value.append(von_mises)
+
+def write_data_to_csv(csv_file_name, return_value_dict, phase_num):
+    column_key = 1 
+    column_value1 = 2 * phase_num 
+    column_value2 = 2 * phase_num + 1 
+
+    try:
+        with open(csv_file_name, mode='r', newline='') as csvfile:
+            reader = list(csv.reader(csvfile))
+    except FileNotFoundError:
+        reader = []
+
+    if not reader:
+        reader.append([''] * max(column_value1, column_value2))
+    if len(reader[0]) < column_value2:
+        reader[0].extend([''] * (column_value2 - len(reader[0])))
+    reader[0][column_value1 - 1] = phase_num
+
+    for key in return_value_dict.keys():
+        found = False
+        if phase_num == 1:
+            row = [''] * max(column_value1, column_value2)
+            row[column_key - 1] = key
+            row[column_value1 - 1] = return_value_dict[key][3]
+            row[column_value2 - 1] = return_value_dict[key][4]
+            reader.append(row)
+        else:
+            for row in reader[1:]:  # Skip header
+                if len(row) > 0 and row[0] == key:
+                    if len(row) < column_value2:
+                        row.extend([''] * (column_value2 - len(row)))
+                    row[column_value1 - 1] = return_value_dict[key][3]
+                    row[column_value2 - 1] = return_value_dict[key][4]
+                    found = True
+                    break
+            if not found:
+                row = [''] * max(column_value1, column_value2)
+                row[0] = key
+                row[column_value1 - 1] = return_value_dict[key][3]
+                row[column_value2 - 1] = return_value_dict[key][4]
+                reader.append(row)
+
+    with open(csv_file_name, mode='w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerows(reader)
+
 def main():
     loop_num = int(sys.argv[9])
     start_phase_num = int(sys.argv[10]) - 1
@@ -545,11 +743,11 @@ def main2(phase_num):
     logging.info(f"解析に使用した入力ファイル名：{input_dat_file_name}")
     print(f"解析に使用した入力ファイル名：{input_dat_file_name}")
 
-    b_use_thickness = om.get_from_flag_data_list(4)
+    b_use_thickness = False if str(sys.argv[15]) == "0" else True
     node_dict = {}
-    pshell_dict = {}
+    psolid_pshell_dict = {}
     mat1_dict = {}
-    cquad4_ctria3_dict = {}
+    ctetra_cquad4_ctria3_dict = {}
     force_grid_list = []
     all_node_id_set = set()
     with open(input_dat_file_name, 'r', encoding='utf-8') as file:
@@ -563,45 +761,45 @@ def main2(phase_num):
             if line.startswith('GRID'):
                 # フォーマットは8カラムで固定長（8文字ずつ）なので、それに基づいてフィールドを取得
                 grid_id = int(line[8:16].strip())
-                x = float(line[24:32].strip())
-                y = float(line[32:40].strip())
-                z = float(line[40:48].strip())
+                x = safe_float_conv(line[24:32].strip())
+                y = safe_float_conv(line[32:40].strip())
+                z = safe_float_conv(line[40:48].strip())
                 node_dict[grid_id] = [x, y, z]
                 all_node_id_set.add(grid_id)
-            if line.startswith('PSHELL'):
+            if line.startswith('PSOLID') or line.startswith('PSHELL'):
                 elem_id = int(line[8:16].strip())
                 mat_id = int(line[16:24].strip())
-                thickness = float(line[24:32].strip())
-                initial_thickness_temp = om.get_from_thickness_youngsmodulus_data_dict(elem_id)
-                b_skip_optimize_pshell = False
+                thickness = 0.0
+                b_skip_optimize_psolid_pshell = False
                 if b_use_thickness:
+                    thickness = safe_float_conv(line[24:32].strip())
+                    initial_thickness_temp = om.get_from_thickness_youngsmodulus_data_dict(elem_id)
                     if check_skip_optimize(thickness, initial_thickness_temp, threshold, phase_num):
-                        b_skip_optimize_pshell = True
-                if not b_skip_optimize_pshell:
-                    pshell_dict[elem_id] = [mat_id, thickness]
+                        b_skip_optimize_psolid_pshell = True
+                if not b_skip_optimize_psolid_pshell:
+                    psolid_pshell_dict[elem_id] = [mat_id, thickness]
             if line.startswith('MAT1'):
                 mat_id = int(line[8:16].strip())
-                youngmodulus = float(line[16:24].strip())
+                youngmodulus = safe_float_conv(line[16:24].strip())
                 initial_youngsmodulus_temp = om.get_from_thickness_youngsmodulus_data_dict(mat_id)
                 b_skip_optimize_mat1 = False
                 if not b_use_thickness:
                     if check_skip_optimize(youngmodulus, initial_youngsmodulus_temp, threshold, phase_num):
                         b_skip_optimize_mat1 = True
                 if b_skip_optimize_mat1:
-                    del pshell_dict[mat_id]
+                    del psolid_pshell_dict[mat_id]
                 else:
-                    poissonratio = float(line[32:40].strip())
+                    poissonratio = safe_float_conv(line[32:40].strip())
                     value = [youngmodulus, poissonratio]
                     mat1_dict[mat_id] = value
-            if line.startswith('CQUAD4') or line.startswith('CTRIA3'):
-            # if line.startswith('CQUAD4'):
+            if line.startswith('CTETRA') or line.startswith('CQUAD4') or line.startswith('CTRIA3'):
                 elem_id = int(line[8:16].strip())
-                if elem_id in pshell_dict:
+                if elem_id in psolid_pshell_dict:
                     value = None
                     x1 = int(line[24:32].strip())
                     x2 = int(line[32:40].strip())
                     x3 = int(line[40:48].strip())
-                    if line.startswith('CQUAD4'):
+                    if line.startswith('CTETRA') or line.startswith('CQUAD4'):
                         x4 = int(line[48:56].strip())
                         value = [x1, x2, x3, x4]
                     if line.startswith('CTRIA3'):
@@ -610,14 +808,14 @@ def main2(phase_num):
                     for x in value:
                         count = force_grid_list.count(x)
                         if count > 0:
-                            logging.debug(f"要素{elem_id}は節点{x}を持ち、この節点はFORCEカードで荷重がかかっているため、最適化の対象から外します（残すことは確定）。")
+                            logging.debug(f"要素{elem_id}は節点{x}を持ち、この節点はFORCEカードで荷重がかかっているため、最適化の対象から外します（残ることが確定）。")
                             b_is_remain_elem_forcely = True
                             break
                     if b_is_remain_elem_forcely:
-                        del pshell_dict[elem_id]
+                        del psolid_pshell_dict[elem_id]
                         del mat1_dict[elem_id]
                     else:
-                        cquad4_ctria3_dict[elem_id] = value
+                        ctetra_cquad4_ctria3_dict[elem_id] = value
 
     input_f06_file_name = "{}_phase_{}.f06".format(str(f06_file_path)[:-4], phase_num - 1)
     if phase_num == 1:
@@ -626,8 +824,9 @@ def main2(phase_num):
 
     merged_elem_list = []
     upper_limit_of_stress = float(sys.argv[14])
-    for pshell_key, value in pshell_dict.items():
-        eid = pshell_key
+    is_solid_flag = om.is_solid()
+    for psolid_pshell_key, value in psolid_pshell_dict.items():
+        eid = psolid_pshell_key
         stress_value = stress_dict[eid]
         von_mises = stress_value[3]
         if von_mises > upper_limit_of_stress:
@@ -644,20 +843,28 @@ def main2(phase_num):
         merged_dict = {}
         merged_dict['eid'] = eid
     
-        merged_dict['stress_part_1'] = stress_value[0]
-        merged_dict['stress_part_2'] = stress_value[1]
-        merged_dict['stress_part_3'] = stress_value[2]
-        merged_dict['von_mises'] = von_mises
+        if is_solid_flag:
+            merged_dict['normal_x'] = stress_value[0]
+            merged_dict['normal_y'] = stress_value[1]
+            merged_dict['normal_z'] = stress_value[2]
+            merged_dict['shear_xy'] = stress_value[4]
+            merged_dict['shear_yz'] = stress_value[5]
+            merged_dict['shear_zx'] = stress_value[6]
+        else:
+            merged_dict['stress_part_1'] = stress_value[0]
+            merged_dict['stress_part_2'] = stress_value[1]
+            merged_dict['stress_part_3'] = stress_value[2]
 
-        cquad4_ctria3_value = cquad4_ctria3_dict[eid]
-        merged_dict['nodes'] = cquad4_ctria3_value
+        merged_dict['von_mises'] = von_mises
+        ctetra_cquad4_ctria3_value = ctetra_cquad4_ctria3_dict[eid]
+        merged_dict['nodes'] = ctetra_cquad4_ctria3_value
         mat1_value = mat1_dict[value[0]]
         merged_dict['thickness'] = thickness
         merged_dict['youngsmodulus'] = mat1_value[0]
         merged_dict['poissonratio'] = mat1_value[1]
 
         node_data = []
-        for nid in cquad4_ctria3_value:
+        for nid in ctetra_cquad4_ctria3_value:
             node_value = node_dict[nid]
             node_value_dict = {}
             node_value_dict['nid'] = nid
@@ -665,10 +872,15 @@ def main2(phase_num):
             node_value_dict['y'] = node_value[1]
             node_value_dict['z'] = node_value[2]
             node_data.append(node_value_dict)
+
         merged_dict['node_data'] = node_data
-        area = calculate_area(node_data)
-        merged_dict['area'] = area
-        merged_dict['volume'] = area * thickness
+        if is_solid_flag:
+            volume = calc_tetrahedron_volume(node_data)
+            merged_dict['volume'] = volume
+        else:
+            area = calculate_area(node_data)
+            merged_dict['area'] = area
+            merged_dict['volume'] = area * thickness
 
         merged_elem_list.append(merged_dict)
     
@@ -684,83 +896,60 @@ def main2(phase_num):
     density_power_calc = 0 if b_use_thickness else density_power
 
     first_thickness_density_percentage = target_thickness_density_percentage
+    return_value_dict = {}
+    for index, elem in enumerate(merged_elem_list):
+        eid = int(elem.get('eid', 0))
+        initial_thickness_youngsmodulus = om.get_from_thickness_youngsmodulus_data_dict(eid)
+        volume = float(elem.get('volume', 0))
+        return_value = [] # [alpha_value, beta_value, kappa_i, energy_part]
+        calculate_ising_part(elem,
+                             initial_thickness_youngsmodulus,
+                             volume,
+                             first_thickness_density_percentage,
+                             density_power_calc,
+                             density_increment,
+                             phase_num,
+                             b_use_thickness,
+                             is_solid_flag,
+                             threshold,
+                             return_value)
+        
+        energy_list_for_scale.append(return_value[0] * return_value[2])
+        energy_list_for_scale.append(return_value[1] * return_value[2])
+
+        volume_list_for_scale.append(volume)
+        volume_list_for_scale.append(-1.0 * volume)
+
+        return_value_dict[eid] = return_value
+
+    std_of_energy_list = np.std(energy_list_for_scale)
+    std_of_volume_list = np.std(volume_list_for_scale)
+
     ising_index_eid_map = {}
     nInternalid = len(merged_elem_list)
     h = defaultdict(int)
     J = defaultdict(int)
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
-        stress_part_1 = elem.get('stress_part_1', 0)
-        stress_part_2 = elem.get('stress_part_2', 0)
-        stress_part_3 = elem.get('stress_part_3', 0)
-        poissonratio = float(elem.get('poissonratio', 0))
-        thickness = float(elem.get('thickness', 0))
-        youngsmodulus = float(elem.get('youngsmodulus', 0))
-        volume = float(elem.get('volume', 0))
-
         ising_index_eid_map[eid] = index
 
-        thickness_density_percentage_now = 0.0
-        initial_thickness_youngsmodulus = om.get_from_thickness_youngsmodulus_data_dict(eid)
-        if phase_num == 1:
-            thickness_density_percentage_now = first_thickness_density_percentage
-        else:
-            thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
-            thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness, threshold)
+        return_val = return_value_dict[eid]
 
-        density_plus_delta = thickness_density_percentage_now + density_increment
-        density_minus_delta = thickness_density_percentage_now - density_increment
-
-        alpha_value = pow(density_plus_delta, (1 - density_power_calc))
-        beta_value = pow(density_minus_delta, (1 - density_power_calc))
-
-        # kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_thickness_youngsmodulus
-        kappa_i = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) * volume / initial_thickness_youngsmodulus
-        
-        energy_list_for_scale.append(alpha_value * kappa_i)
-        energy_list_for_scale.append(beta_value * kappa_i)
-
-        volume_list_for_scale.append(volume)
-        volume_list_for_scale.append(-1.0 * volume)
-
-    std_of_energy_list = np.std(energy_list_for_scale)
-    std_of_volume_list = np.std(volume_list_for_scale)
-
-    for index, elem in enumerate(merged_elem_list):
-        eid = int(elem.get('eid', 0))
-        stress_part_1 = elem.get('stress_part_1', 0)
-        stress_part_2 = elem.get('stress_part_2', 0)
-        stress_part_3 = elem.get('stress_part_3', 0)
-        poissonratio = float(elem.get('poissonratio', 0))
-        thickness = float(elem.get('thickness', 0))
-        youngsmodulus = float(elem.get('youngsmodulus', 0))
-        volume = float(elem.get('volume', 0))
-
-        ising_index_eid_map[eid] = index
-
-        thickness_density_percentage_now = 0.0
-        initial_thickness_youngsmodulus = om.get_from_thickness_youngsmodulus_data_dict(eid)
-        if phase_num == 1:
-            thickness_density_percentage_now = first_thickness_density_percentage
-        else:
-            thickness_youngmodulus = thickness if b_use_thickness else youngsmodulus
-            thickness_density_percentage_now = calculate_thickness_density_percentage(thickness_youngmodulus, initial_thickness_youngsmodulus, density_power, b_use_thickness, threshold)
-
-        density_plus_delta = thickness_density_percentage_now + density_increment
-        density_minus_delta = thickness_density_percentage_now - density_increment
-
-        alpha_value = pow(density_plus_delta, (1 - density_power_calc))
-        beta_value = pow(density_minus_delta, (1 - density_power_calc))
-        k_0 = (alpha_value - beta_value) / 2.0
-        # kappa_i = (pow(stressxx, 2.0) - 2.0 * poissonratio * stressxx * stressyy + pow(stressyy, 2.0) + 2.0 * (1.0 + poissonratio) * pow(stressxy, 2.0)) * volume / initial_thickness_youngsmodulus
-        kappa_i = (stress_part_1 - poissonratio * stress_part_2 + (1.0 + poissonratio) * stress_part_3) * volume / initial_thickness_youngsmodulus
-
-        h_first = k_0 * kappa_i / std_of_energy_list / np.sqrt(nInternalid) / 3.0
+        k_0 = (return_val[0] - return_val[1]) / 2.0
+        h_first = k_0 * return_val[2] / std_of_energy_list / np.sqrt(nInternalid) / 3.0
         h[index] = h_first
+        return_val[3] = h_first # energy_partをh_first_and_von_mises_csvに記録する場合はこの行をコメントアウトしてください
 
         for j_index in range(index + 1, nInternalid):
             volume_j = merged_elem_list[j_index].get('volume', 0)
             J[(index,j_index)] = 2.0 * cost_lambda * volume * volume_j / pow(std_of_volume_list, 2) / nInternalid / 9.0
+
+    b_for_debug = om.get_from_flag_data_list(4)
+    if b_for_debug:
+        base_name, ext = os.path.splitext(sys.argv[1])
+        h_first_and_von_mises_csv = base_name + '_h_first_and_von_mises.csv'
+        rename_old_filename(h_first_and_von_mises_csv)
+        write_data_to_csv(h_first_and_von_mises_csv, return_value_dict, phase_num)
 
     elapsed_time_2 = time.time() - start_time_2
     logging.info(f"最適化処理の準備にかかった時間：{str(elapsed_time_2)} [s]")
@@ -844,18 +1033,18 @@ def main2(phase_num):
 
     new_dat_file_name = increment_phase_number(input_dat_file_name)
     new_dat_temp_file_name = new_dat_file_name + ".tmp"
-    same_pshell_flag = 0
+    same_psolid_pshell_flag = 0
     used_node_id_set = set()
     with open(new_dat_temp_file_name, 'w', encoding='utf-8') as file:
         for line in lines:
-            if line.startswith('PSHELL'):
+            if line.startswith('PSOLID') or line.startswith('PSHELL'):
                 elem_id = int(line[8:16].strip())
                 mat_id = int(line[16:24].strip())
                 if elem_id in zero_fix_density_index_list:
                     line = f"${line}"
-                    same_pshell_flag = 1
+                    same_psolid_pshell_flag = 1
                 else:
-                    if b_use_thickness:
+                    if b_use_thickness and line.startswith('PSHELL'):
                         line_strip = line.strip()
                         thickness_value = mat_thickness_youngmodulus.get(str(elem_id), None)
                         if thickness_value is None:
@@ -872,8 +1061,8 @@ def main2(phase_num):
                             )
 
             if line.startswith('MAT1'):
-                if same_pshell_flag == 1:
-                    same_pshell_flag = 2
+                if same_psolid_pshell_flag == 1:
+                    same_psolid_pshell_flag = 2
                     line = f"${line}"
                 else:
                     line_strip = line.strip()
@@ -891,10 +1080,9 @@ def main2(phase_num):
                                 line_strip[24:] +
                                 '\n'
                             )
-            # if line.startswith('CQUAD4'):
-            if line.startswith('CQUAD4') or line.startswith('CTRIA3'):
-                if same_pshell_flag == 2:
-                    same_pshell_flag = 0
+            if line.startswith('CTETRA') or line.startswith('CQUAD4') or line.startswith('CTRIA3'):
+                if same_psolid_pshell_flag == 2:
+                    same_psolid_pshell_flag = 0
                     line = f"${line}"
                 else:
                     x1 = int(line[24:32].strip())
@@ -903,7 +1091,7 @@ def main2(phase_num):
                     used_node_id_set.add(x1)
                     used_node_id_set.add(x2)
                     used_node_id_set.add(x3)
-                    if line.startswith('CQUAD4'):
+                    if line.startswith('CTETRA') or line.startswith('CQUAD4'):
                         x4 = int(line[48:56].strip())
                         used_node_id_set.add(x4)
 
@@ -958,20 +1146,21 @@ if __name__ == '__main__':
     if b_is_set_sys_argv_on_program:
             sys.argv = [
                 "cae_optimize_nastran.py", 
-                "C:\\work\\github\\q-annealing-d-wave-test\\check.dat",
-                "C:\\work\\github\\q-annealing-d-wave-test\\check.f06",
+                "C:\\work\\github\\q-annealing-d-wave-test\\test-solid2.dat",
+                "C:\\work\\github\\q-annealing-d-wave-test\\test-solid2.f06",
                 "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_vscode_debug.log",
                 "C:\\MSC.Software\\MSC_Nastran\\20122\\bin\\nastranw.exe",
                 0.5,  ### target_density
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 5,    ### cost_lambda
-                15,   ### loop_num
+                1,   ### loop_num
                 1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
-                20,  ### upper_limit_of_stress
+                20000,  ### upper_limit_of_stress
+                0,  ### use_thickness_flag
             ]
     setup_logging(sys.argv[3])
     logging.info("\n\n")
