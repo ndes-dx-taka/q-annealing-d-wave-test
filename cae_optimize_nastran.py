@@ -2,7 +2,7 @@
 # 開発ネットワークでの連続実行では下記。
 flag_data_list = [True, False, True, True, True]
 # nastranがない場合のデバッグ時は下記
-flag_data_list = [True, True, True, False, True]
+# flag_data_list = [True, True, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -23,6 +23,13 @@ from dwave.system import LeapHybridSampler
 import numpy as np
 import os
 import pprint
+from qiskit_optimization import QuadraticProgram
+from qiskit_optimization.algorithms import MinimumEigenOptimizer
+from qiskit_algorithms import NumPyMinimumEigensolver
+from qiskit_optimization.algorithms import GroverOptimizer
+from qiskit.primitives import Sampler, StatevectorSampler
+from qiskit_aer import Aer, AerSimulator
+from qiskit_optimization.algorithms import CplexOptimizer
 import random
 import re
 import sys
@@ -58,6 +65,7 @@ class OptimizeManager:
         self._is_solid = False
         self._cost_lambda = -1.0
         self._mat_thickness_youngmodulus_remain = {}
+        self._sum_target_volume = -1.0
     
     def get_from_flag_data_list(self, index):
         return self._flag_data_list[index]
@@ -91,11 +99,22 @@ class OptimizeManager:
                         if str(key) == "Solid_flag":
                             if value == "1":
                                 self._is_solid = True
+                        elif str(key) == "First_sum_volume":
+                            self._sum_target_volume = float(value)
                         else:
                             self._thickness_youngsmodulus_data_dict[int(key)] = float(value)
             logging.info(f"Data loaded from {csvpath} into _thickness_youngsmodulus_data_dict.")
         else:
             logging.info("_thickness_youngsmodulus_data_dict is not empty, skipping load.")
+
+    def update_thickness_youngsmodulus_csv(self, csvpath, rownumber, new_row):
+        with open(csvpath, 'r', newline='') as file:
+            reader = list(csv.reader(file))
+        reader.insert(rownumber, new_row)
+        with open(csvpath, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerows(reader)
+        self._sum_target_volume = new_row[1]
 
     def is_solid(self):
         return self._is_solid
@@ -758,6 +777,137 @@ def write_data_to_csv_youngsmodulus(csv_file_name, mat_thickness_youngmodulus_te
         writer = csv.writer(file)
         writer.writerows(data)
 
+def do_qiskit_single_optimize(
+        h,
+        J,
+        S_minus_1,
+        S_plus_1
+):
+    qp = QuadraticProgram()
+    num_variables = max(max(h.keys()), max(j for i, j in J.keys())) + 1
+    for i in range(num_variables):
+        qp.binary_var(f'x{i}')
+    linear = {}
+    quadratic = {}
+    # 線形項のQUBO変数からイジング変数への変換: h_i * σ_i -> h_i * (2*x_i - 1)
+    for i in h:
+        linear[f'x{i}'] = 2 * h[i]
+    # 二次項の変換: J_ij * σ_i * σ_j -> J_ij * (2*x_i - 1) * (2*x_j - 1)
+    for (i, j), Jij in J.items():
+        quadratic[f'x{i}', f'x{j}'] = 4 * Jij
+        linear[f'x{i}'] -= 2 * Jij
+        linear[f'x{j}'] -= 2 * Jij
+    qp.minimize(linear=linear, quadratic=quadratic)
+
+    # 下記のあたりは量子ビット数が増えると使えない
+    # optimizer = MinimumEigenOptimizer(NumPyMinimumEigensolver())
+    # result = optimizer.solve(qp)
+
+    # grover_optimizer = GroverOptimizer(num_value_qubits=num_variables, sampler=StatevectorSampler())
+    # result = grover_optimizer.solve(qp)
+
+    cplex_optimizer = CplexOptimizer()
+    result = cplex_optimizer.solve(qp)
+
+    # backend = Aer.get_backend('statevector_simulator')
+    # logging.debug(f"Qiskitの最適化問題の内容：{qp.prettyprint()}")
+
+    solution = result.x
+
+    for i, val in enumerate(solution):
+        if val == 0:
+            S_minus_1.append(i)  # 0の場合、S_mにインデックスを追加
+        elif val == 1:
+            S_plus_1.append(i)  # 1の場合、S_pにインデックスを追加
+
+def do_dwave_single_optimize(
+        h,
+        J,
+        S_minus_1,
+        S_plus_1
+):
+    sampler = LeapHybridSampler()
+    response = sampler.sample_ising(h, J)
+    logging.debug(f"D-waveの最適化結果の生データ：{response.record}")
+
+    sample = next(response.data(fields=['sample']))
+    for k, v in sample.items():
+        if v == -1:
+            S_minus_1.append(k)
+        if v == 1:
+            S_plus_1.append(k)
+
+def do_single_optimize(
+        s_optimize_rule,
+        h,
+        J,
+        ising_index_dict,
+        inverse_ising_index_eid_map,
+        merged_elem_list,
+        b_use_thickness,
+        density_increment,
+        first_sum_volume,
+        phase_num,
+        cost_lambda_calc,
+        b_for_debug
+):
+    S_minus_1 = []
+    S_plus_1 = []
+    if s_optimize_rule == "d-wave":
+        do_dwave_single_optimize(h, J, S_minus_1, S_plus_1)
+    elif s_optimize_rule == "qiskit":
+        do_qiskit_single_optimize(h, J, S_minus_1, S_plus_1)
+    minus_vol = 0.0
+    plus_vol = 0.0
+
+    for idx in S_minus_1:
+        ising_index_dict[idx] = -1
+        eid_temp = inverse_ising_index_eid_map[idx]
+        elem_temp = next((d for d in merged_elem_list if int(d['eid']) == int(eid_temp)), None)
+        if b_use_thickness:
+            area = float(elem_temp.get('area', 0))
+            thickness_diff = density_increment
+            volume_diff = thickness_diff * area
+            minus_vol += volume_diff
+        else:
+            density_diff = density_increment
+            volume_pre = float(elem_temp.get('volume', 0))
+            volume_reflect_density_diff = volume_pre * density_diff
+            minus_vol += volume_reflect_density_diff
+            
+    for idx in S_plus_1:
+        ising_index_dict[idx] = 1
+        eid_temp = inverse_ising_index_eid_map[idx]
+        elem_temp = next((d for d in merged_elem_list if int(d['eid']) == int(eid_temp)), None)
+        if b_use_thickness:
+            area = float(elem_temp.get('area', 0))
+            thickness_diff = density_increment
+            volume_diff = thickness_diff * area
+            plus_vol += volume_diff
+        else:
+            density_diff = density_increment
+            volume_pre = float(elem_temp.get('volume', 0))
+            volume_reflect_density_diff = volume_pre * density_diff
+            plus_vol += volume_reflect_density_diff
+
+    vol_diff = abs(plus_vol - minus_vol)
+    diff_percentage = vol_diff * 100.0 / first_sum_volume
+    logging.info(f"最適化による体積の増分：{vol_diff}、初期体積に占める変化量の割合：{diff_percentage}(%)（※ペナルティ係数：{cost_lambda_calc}）")
+    percentage_threshold = 0.1
+    if diff_percentage < percentage_threshold:
+        logging.info(f"最適化における初期体積に占める変化量の割合：{diff_percentage}(%)が、{percentage_threshold}(%)を下回ったため、{phase_num}回目の最適化を完了します。")
+        print(f"最適化における初期体積に占める変化量の割合：{diff_percentage}(%)が、{percentage_threshold}(%)を下回ったため、{phase_num}回目の最適化を完了します。")
+        return True
+    else:
+        logging.info(f"最適化における初期体積に占める変化量の割合：{diff_percentage}(%)が、{percentage_threshold}(%)を上回ったため、{phase_num}回目の最適化を再度行います。")
+        print(f"最適化における初期体積に占める変化量の割合：{diff_percentage}(%)が、{percentage_threshold}(%)を上回ったため、{phase_num}回目の最適化を再度行います。")
+    if b_for_debug:
+        element_count_minus = len(S_minus_1)
+        logging.debug(f"The number of elements minus ising index in the array is: {element_count_minus}, cost lambda is: {cost_lambda_calc}")
+        element_count_plus = len(S_plus_1)
+        logging.debug(f"The number of elements plus ising index in the array is: {element_count_plus}, cost lambda is: {cost_lambda_calc}")
+    return False
+
 def main():
     loop_num = int(sys.argv[9])
     start_phase_num = int(sys.argv[10]) - 1
@@ -898,13 +1048,14 @@ def main2(phase_num):
         eid = psolid_pshell_key
         stress_value = stress_dict[eid]
         von_mises = stress_value[3]
+        thickness = value[1]
         if von_mises > upper_limit_of_stress:
             logging.debug(f"eid={eid}の要素のvon mises応力値{von_mises}が、基準値として指定した{upper_limit_of_stress}を超えたためにこの要素の最適化をスキップします。")
-            initial_thickness_youngsmodulus_temp = om.get_from_thickness_youngsmodulus_data_dict(eid)
-            om._mat_thickness_youngmodulus_remain[str(eid)] = initial_thickness_youngsmodulus_temp
+            mat_value = mat1_dict[eid]
+            thickness_youngmodulus_temp = thickness if b_use_thickness else mat_value[0]
+            om._mat_thickness_youngmodulus_remain[str(eid)] = thickness_youngmodulus_temp
             continue
 
-        thickness = value[1]
         if b_use_thickness:
             initial_thickness_check = om.get_from_thickness_youngsmodulus_data_dict(eid)
             if initial_thickness_check >= threshold:
@@ -968,6 +1119,12 @@ def main2(phase_num):
         sum_volume_pre += volume_reflect_density
 
         merged_elem_list.append(merged_dict)
+
+    if phase_num == 1:
+        base_name, ext = os.path.splitext(dat_file_path)
+        reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
+        new_row = ['First_sum_volume', sum_volume_pre]
+        om.update_thickness_youngsmodulus_csv(reserve_data_csv, 2, new_row)
 
     logging.debug(f"{phase_num}回目の最適化前の、密度を考慮した体積の合計値：{sum_volume_pre}")
     
@@ -1042,6 +1199,12 @@ def main2(phase_num):
     elapsed_time_2 = time.time() - start_time_2
     logging.info(f"最適化処理の準備にかかった時間：{str(elapsed_time_2)} [s]")
 
+    b_fin_optimize = 0
+    finish_elem_num = int(sys.argv[13])
+    if len(merged_elem_list) <= finish_elem_num:
+        logging.info(f"最適化が完了していない要素の数({len(merged_elem_list)})が{finish_elem_num}以下になったため、要素の0/1を決定します")
+        b_fin_optimize = 1
+
     logging.info(f"{phase_num}回目の最適化を開始します。")
     print(f"{phase_num}回目の最適化を開始します。")
     print("最適化実行中…")
@@ -1053,73 +1216,39 @@ def main2(phase_num):
     b_for_debug = om.get_from_flag_data_list(4)
     b_do_optimize = om.get_from_flag_data_list(0)
     inverse_ising_index_eid_map = {value: key for key, value in ising_index_eid_map.items()}
-    if b_do_optimize:
+    if b_do_optimize and not b_fin_optimize:
         b_do_single_optimize = True
+        n_optimize_num = 1
         while b_do_single_optimize:
-            sampler = LeapHybridSampler()
-            response = sampler.sample_ising(h, J)
-            minus_vol = 0.0
-            plus_vol = 0.0
-
-            for sample, E in response.data(fields=['sample','energy']):
-                S_minus_1 = [k for k,v in sample.items() if v == -1]
-                S_plus_1 = [k for k,v in sample.items() if v == 1]
-
-                for idx in S_minus_1:
-                    ising_index_dict[idx] = -1
-                    eid_temp = inverse_ising_index_eid_map[idx]
-                    elem_temp = next((d for d in merged_elem_list if int(d['eid']) == int(eid_temp)), None)
-                    if b_use_thickness:
-                        thickness = float(elem_temp.get('thickness', 0))
-                        area = float(elem_temp.get('area', 0))
-                        thickness_diff = density_increment
-                        volume_diff = thickness_diff * area
-                        minus_vol += volume_diff
-                    else:
-                        density_pre = float(elem_temp.get('density_pre', 0))
-                        density_diff = density_increment
-                        volume_pre = float(elem_temp.get('volume', 0))
-                        volume_reflect_density_diff = volume_pre * density_diff
-                        minus_vol += volume_reflect_density_diff
-                        
-                for idx in S_plus_1:
-                    ising_index_dict[idx] = 1
-                    eid_temp = inverse_ising_index_eid_map[idx]
-                    elem_temp = next((d for d in merged_elem_list if int(d['eid']) == int(eid_temp)), None)
-                    if b_use_thickness:
-                        thickness = float(elem_temp.get('thickness', 0))
-                        area = float(elem_temp.get('area', 0))
-                        thickness_diff = density_increment
-                        volume_diff = thickness_diff * area
-                        plus_vol += volume_diff
-                    else:
-                        density_pre = float(elem_temp.get('density_pre', 0))
-                        density_diff = density_increment
-                        volume_pre = float(elem_temp.get('volume', 0))
-                        volume_reflect_density_diff = volume_pre * density_diff
-                        plus_vol += volume_reflect_density_diff
-
-                vol_diff = abs(plus_vol - minus_vol)
-                diff_percentage = vol_diff * 100.0 / sum_volume_pre
-                logging.info(f"最適化による体積の増分：{vol_diff}、初期体積に占める変化量の割合：{diff_percentage}(%)（※ペナルティ係数：{cost_lambda_calc}）")
-                percentage_threshold = 0.1
-                if diff_percentage < percentage_threshold:
-                    b_do_single_optimize = False
-                    logging.info(f"最適化によって初期体積に占める変化量の割合：{diff_percentage}(%)が、{percentage_threshold}(%)を下回ったため、{phase_num}回目の最適化を完了します。")
-                    b_omit_calculate_cost_lambda_each_time = True
-                    if b_omit_calculate_cost_lambda_each_time:
-                        om.set_cost_lambda(cost_lambda_calc)
-                else:
-                    cost_lambda_calc *= cost_lambda_calc_multiply
-                    for key in J:
-                        J[key] *= cost_lambda_calc_multiply
-                    logging.info(f"最適化によって初期体積に占める変化量の割合：{diff_percentage}(%)が、{percentage_threshold}(%)を上回ったため、{phase_num}回目の最適化を再度行います。")
-
-                if b_for_debug:
-                    element_count_minus = len(S_minus_1)
-                    logging.debug(f"The number of elements minus ising index in the array is: {element_count_minus}, cost lambda is: {cost_lambda_calc}")
-                    element_count_plus = len(S_plus_1)
-                    logging.debug(f"The number of elements plus ising index in the array is: {element_count_plus}, cost lambda is: {cost_lambda_calc}")
+            if n_optimize_num >= 5:
+                print("試行回数が5回を超えたため、最適化を進めます。")
+                break
+            print(f"ペナルティ係数：{cost_lambda_calc}での最適化を開始します。フェーズ数：{phase_num}、試行回数：{n_optimize_num}回目")
+            n_optimize_num += 1
+            s_optimize_rule = "qiskit"
+            b_fin_single_optimize = do_single_optimize(
+                s_optimize_rule,
+                h,
+                J,
+                ising_index_dict,
+                inverse_ising_index_eid_map,
+                merged_elem_list,
+                b_use_thickness,
+                density_increment,
+                om._sum_target_volume,
+                phase_num,
+                cost_lambda_calc,
+                b_for_debug
+            )
+            if b_fin_single_optimize:
+                b_do_single_optimize = False
+                b_omit_calculate_cost_lambda_each_time = True
+                if b_omit_calculate_cost_lambda_each_time:
+                    om.set_cost_lambda(cost_lambda_calc)
+            else:
+                cost_lambda_calc *= cost_lambda_calc_multiply
+                for key in J:
+                    J[key] *= cost_lambda_calc_multiply
     else:
         # テスト用(最適化のリソース節約のため)
         for index, elem in enumerate(merged_elem_list):
@@ -1148,11 +1277,6 @@ def main2(phase_num):
 
     mat_thickness_youngmodulus = {}
     zero_fix_density_index_list = []
-    b_fin_optimize = 0
-    finish_elem_num = int(sys.argv[13])
-    if len(merged_elem_list) <= finish_elem_num:
-        logging.info(f"最適化が完了していない要素の数が{finish_elem_num}以下になったため、要素の0/1を決定します")
-        b_fin_optimize = 1
     
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
@@ -1313,6 +1437,7 @@ if __name__ == '__main__':
     if b_is_set_sys_argv_on_program:
             sys.argv = [
                 "cae_optimize_nastran.py", 
+                # "C:\\work\\github\\q-annealing-d-wave-test\\test2-shell2.dat",
                 "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.dat",
                 "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.f06",
                 "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_vscode_debug.log",
@@ -1320,9 +1445,9 @@ if __name__ == '__main__':
                 0.5,  ### target_density
                 0.1,  ### density_increment
                 2.0,  ### density_power
-                1,    ### cost_lambda
-                5,   ### loop_num
-                5,    ### start_phase_num
+                4,    ### cost_lambda
+                1,   ### loop_num
+                1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
