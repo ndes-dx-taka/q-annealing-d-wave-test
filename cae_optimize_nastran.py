@@ -1062,6 +1062,7 @@ def main2(phase_num):
                     thickness = safe_float_conv(line[24:32].strip())
                     initial_thickness_temp = om.get_from_thickness_youngsmodulus_data_dict(elem_id)
                     if check_skip_optimize(thickness, initial_thickness_temp, threshold, phase_num):
+                        om._mat_thickness_youngmodulus_remain[str(elem_id)] = initial_thickness_temp
                         b_skip_optimize_psolid_pshell = True
                 if not b_skip_optimize_psolid_pshell:
                     psolid_pshell_dict[elem_id] = [mat_id, thickness]
@@ -1072,6 +1073,7 @@ def main2(phase_num):
                 b_skip_optimize_mat1 = False
                 if not b_use_thickness:
                     if check_skip_optimize(youngmodulus, initial_youngsmodulus_temp, threshold, phase_num):
+                        om._mat_thickness_youngmodulus_remain[str(mat_id)] = initial_youngsmodulus_temp
                         b_skip_optimize_mat1 = True
                 if b_skip_optimize_mat1:
                     del psolid_pshell_dict[mat_id]
@@ -1508,8 +1510,9 @@ if __name__ == '__main__':
     if b_is_set_sys_argv_on_program:
             sys.argv = [
                 "cae_optimize_nastran.py", 
+                "C:\\work\\github\\q-annealing-d-wave-test\\test2-sa-shell1.dat",
                 # "C:\\work\\github\\q-annealing-d-wave-test\\test2-shell2.dat",
-                "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.dat",
+                # "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.dat",
                 "notuse",
                 "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_vscode_debug.log",
                 "C:\\MSC.Software\\MSC_Nastran\\20122\\bin\\nastranw.exe",
@@ -1517,14 +1520,14 @@ if __name__ == '__main__':
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 4,    ### cost_lambda
-                1,   ### loop_num
+                30,   ### loop_num
                 1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
                 20000,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
-                "sa-100000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000")
+                "sa-1000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000")
             ]
     setup_logging(sys.argv[3])
     logging.info("\n\n")
