@@ -17,6 +17,7 @@ log_level = logging.DEBUG
 
 from collections import defaultdict
 import csv
+import copy
 # from dwave.system.samplers import DWaveSampler
 # from dwave.system.composites import EmbeddingComposite
 from dwave.system import LeapHybridSampler
@@ -24,12 +25,12 @@ import numpy as np
 import os
 import pprint
 from qiskit_optimization import QuadraticProgram
-from qiskit_optimization.algorithms import MinimumEigenOptimizer
+from qiskit_optimization.algorithms import MinimumEigenOptimizer, ADMMParameters, ADMMOptimizer
 from qiskit_algorithms import NumPyMinimumEigensolver
 from qiskit_optimization.algorithms import GroverOptimizer
 from qiskit.primitives import Sampler, StatevectorSampler
 from qiskit_aer import Aer, AerSimulator
-from qiskit_optimization.algorithms import CplexOptimizer
+from qiskit_optimization.algorithms import CplexOptimizer, ADMMOptimizer, ScipyMilpOptimizer, SlsqpOptimizer
 import random
 import re
 import sys
@@ -777,6 +778,61 @@ def write_data_to_csv_youngsmodulus(csv_file_name, mat_thickness_youngmodulus_te
         writer = csv.writer(file)
         writer.writerows(data)
 
+def calc_hamiltonian_energy(sigma, h, J):
+    energy = 0
+    for i in range(len(sigma)):
+        energy += h[i] * sigma[i]
+    for i in range(len(sigma)):
+        for j in range(i + 1, len(sigma)):
+            energy += J[i, j] * sigma[i] * sigma[j]
+    return energy
+
+def do_simulated_annealing_single_optimize(
+        h,
+        J,
+        initial_temp,
+        cooling_rate,
+        max_iter,
+        S_minus_1,
+        S_plus_1
+):
+    num_spins = len(h)
+    sigma = np.random.choice([-1, 1], size=num_spins)
+    best_sigma = np.random.choice([-1, 1], size=num_spins)
+
+    current_energy = calc_hamiltonian_energy(sigma, h, J)
+    best_energy = current_energy
+    temperature = initial_temp
+
+    for iteration in range(max_iter):
+        i = np.random.randint(num_spins)
+        sigma[i] *= -1
+        delta_energy = 2 * sigma[i] * h[i]
+        for k in range(len(sigma)):
+            if k < i:
+                delta_energy += 2 * J[k, i] * sigma[k] * sigma[i]
+            if k > i:
+                delta_energy += 2 * J[i, k] * sigma[i] * sigma[k]
+        # new_energy = calc_hamiltonian_energy(sigma, h, J)
+        # delta_energy = new_energy - current_energy
+        # delta_energy = 2 * sigma[i] * (h[i] + np.sum(J[i] * sigma))
+        if (current_energy + delta_energy) < best_energy:
+            best_energy = (current_energy + delta_energy)
+            best_sigma = copy.deepcopy(sigma)
+        if delta_energy < 0 or np.random.rand() < np.exp(-delta_energy / temperature):
+            current_energy += delta_energy
+        else:
+            sigma[i] *= -1
+        temperature *= cooling_rate
+
+    # check_energy = calc_hamiltonian_energy(best_sigma, h, J)
+
+    for i, val in enumerate(best_sigma):
+        if val == -1:
+            S_minus_1.append(i)
+        elif val == 1:
+            S_plus_1.append(i)
+
 def do_qiskit_single_optimize(
         h,
         J,
@@ -806,8 +862,17 @@ def do_qiskit_single_optimize(
     # grover_optimizer = GroverOptimizer(num_value_qubits=num_variables, sampler=StatevectorSampler())
     # result = grover_optimizer.solve(qp)
 
+    # admm_optimizer = ADMMOptimizer()
+    # result = admm_optimizer.solve(qp)
+
+    # slsqp_optimizer = SlsqpOptimizer()
+    # result = slsqp_optimizer.solve(qp)
+
     cplex_optimizer = CplexOptimizer()
     result = cplex_optimizer.solve(qp)
+
+    # scipymilp_optimizer = ScipyMilpOptimizer()
+    # result = scipymilp_optimizer.solve(qp)
 
     # backend = Aer.get_backend('statevector_simulator')
     # logging.debug(f"Qiskitの最適化問題の内容：{qp.prettyprint()}")
@@ -857,6 +922,12 @@ def do_single_optimize(
         do_dwave_single_optimize(h, J, S_minus_1, S_plus_1)
     elif s_optimize_rule == "qiskit":
         do_qiskit_single_optimize(h, J, S_minus_1, S_plus_1)
+    elif s_optimize_rule.startswith("sa-"):
+        initial_temp = 10
+        max_iter = int(s_optimize_rule.split('-')[1])
+        temp_threshold = float(1e-3) # 温度が最終的に0.001度になるようにする
+        cooling_rate = float((temp_threshold / initial_temp) ** (1.0 / max_iter))
+        do_simulated_annealing_single_optimize(h, J, initial_temp, cooling_rate, max_iter, S_minus_1, S_plus_1)
     minus_vol = 0.0
     plus_vol = 0.0
 
@@ -1225,7 +1296,7 @@ def main2(phase_num):
                 break
             print(f"ペナルティ係数：{cost_lambda_calc}での最適化を開始します。フェーズ数：{phase_num}、試行回数：{n_optimize_num}回目")
             n_optimize_num += 1
-            s_optimize_rule = "qiskit"
+            s_optimize_rule = sys.argv[16]
             b_fin_single_optimize = do_single_optimize(
                 s_optimize_rule,
                 h,
@@ -1439,7 +1510,7 @@ if __name__ == '__main__':
                 "cae_optimize_nastran.py", 
                 # "C:\\work\\github\\q-annealing-d-wave-test\\test2-shell2.dat",
                 "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.dat",
-                "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.f06",
+                "notuse",
                 "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_vscode_debug.log",
                 "C:\\MSC.Software\\MSC_Nastran\\20122\\bin\\nastranw.exe",
                 0.5,  ### target_density
@@ -1453,6 +1524,7 @@ if __name__ == '__main__':
                 0,    ### finish_elem_num
                 20000,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
+                "sa-100000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000")
             ]
     setup_logging(sys.argv[3])
     logging.info("\n\n")
