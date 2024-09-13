@@ -2,7 +2,7 @@
 # 開発ネットワークでの連続実行では下記。
 flag_data_list = [True, False, True, True, True]
 # nastranがない場合のデバッグ時は下記
-# flag_data_list = [True, True, True, False, True]
+flag_data_list = [True, True, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -22,14 +22,17 @@ import copy
 # from dwave.system.composites import EmbeddingComposite
 from dwave.system import LeapHybridSampler
 import numpy as np
+import openjij as oj
 import os
-import pprint
+import openpyxl
+from openpyxl.chart import BarChart, LineChart, Reference
+# import pprint
+# from qiskit_optimization.algorithms import MinimumEigenOptimizer, ADMMParameters, ADMMOptimizer
+# from qiskit_algorithms import NumPyMinimumEigensolver
+# from qiskit_optimization.algorithms import GroverOptimizer
+# from qiskit.primitives import Sampler, StatevectorSampler
+# from qiskit_aer import Aer, AerSimulator
 from qiskit_optimization import QuadraticProgram
-from qiskit_optimization.algorithms import MinimumEigenOptimizer, ADMMParameters, ADMMOptimizer
-from qiskit_algorithms import NumPyMinimumEigensolver
-from qiskit_optimization.algorithms import GroverOptimizer
-from qiskit.primitives import Sampler, StatevectorSampler
-from qiskit_aer import Aer, AerSimulator
 from qiskit_optimization.algorithms import CplexOptimizer, ADMMOptimizer, ScipyMilpOptimizer, SlsqpOptimizer
 import random
 import re
@@ -65,8 +68,12 @@ class OptimizeManager:
         self._thickness_youngsmodulus_data_dict = thickness_youngsmodulus_data_dict
         self._is_solid = False
         self._cost_lambda = -1.0
+        self._density_remain = {}
         self._mat_thickness_youngmodulus_remain = {}
         self._sum_target_volume = -1.0
+        self._shared_edge_element_dict = defaultdict(set)
+        self._optimize_time_dict = {}
+        self._optimize_elem_num_dict = {}
     
     def get_from_flag_data_list(self, index):
         return self._flag_data_list[index]
@@ -128,6 +135,36 @@ class OptimizeManager:
 
     def get_cost_lambda(self):
         return self._cost_lambda
+
+    def restore_shared_edges_dict(self, edge_dict, csvpath):
+        edge_to_elements = defaultdict(list)
+        
+        for element, edges in edge_dict.items():
+            for edge in edges:
+                sorted_edge = tuple(sorted(edge))
+                edge_to_elements[sorted_edge].append(element)
+        
+        for elements in edge_to_elements.values():
+            if len(elements) > 1:
+                for element in elements:
+                    self._shared_edge_element_dict[element].update(e for e in elements if e != element)
+
+        with open(csvpath, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["キー", "エッジでつながる要素番号リスト"])
+            
+            for key, value in self._shared_edge_element_dict.items():
+                writer.writerow([key, ','.join(map(str, value))])
+
+    def load_shared_elements_dict_from_csv(self, csvpath):
+        with open(csvpath, mode='r') as file:
+            reader = csv.reader(file)
+            next(reader)  # ヘッダーをスキップ
+            for row in reader:
+                key = int(row[0])
+                # カンマ区切りの文字列をセットに変換
+                value = set(map(int, row[1].split(',')))
+                self._shared_edge_element_dict[key] = value
 
 om = OptimizeManager(flag_data_list)
 
@@ -311,9 +348,10 @@ def create_first_phase_zero_nastran_file(input_file_path, output_file_path):
     mat1_card_dict = {}
     ctetra_cquad4_ctria3_psolid_pshell_id_dict = {}
     psolid_pshell_mat1_id_dict = {}
+    edge_dict = {}
     elem_type_dict = {}  # CQUAD4: 0,  CTRIA3: 1,  CTETRA: 2
 
-    base_name, ext = os.path.splitext(input_file_path)
+    base_name, _ = os.path.splitext(input_file_path)
 
     content = get_file_content(input_file_path)
 
@@ -323,12 +361,26 @@ def create_first_phase_zero_nastran_file(input_file_path, output_file_path):
             psolid_pshell_id = int(line[16:24].strip())
             ctetra_cquad4_ctria3_cards_dict[ctetra_cquad4_ctria3_id] = line.strip()
             ctetra_cquad4_ctria3_psolid_pshell_id_dict[ctetra_cquad4_ctria3_id] = psolid_pshell_id
+            node_list = None
+            x1 = int(line[24:32].strip())
+            x2 = int(line[32:40].strip())
+            x3 = int(line[40:48].strip())
             if line.startswith('CQUAD4'):
                 elem_type_dict[ctetra_cquad4_ctria3_id] = int(0)
+                x4 = int(line[48:56].strip())
+                node_list = [x1, x2, x3, x4]
             if line.startswith('CTRIA3'):
                 elem_type_dict[ctetra_cquad4_ctria3_id] = int(1)
+                node_list = [x1, x2, x3]
             if line.startswith('CTETRA'):
                 elem_type_dict[ctetra_cquad4_ctria3_id] = int(2)
+                x4 = int(line[48:56].strip())
+                node_list = [x1, x2, x3, x4]
+            edge_data = []
+            for i in range(len(node_list) - 1):
+                edge_data.append((node_list[i], node_list[i + 1]))
+            edge_data.append((node_list[-1], node_list[0]))
+            edge_dict[ctetra_cquad4_ctria3_id] = edge_data
         elif line.startswith('PSOLID') or line.startswith('PSHELL'):
             psolid_pshell_id = int(line[8:16].strip())
             mat_id = int(line[16:24].strip())
@@ -339,6 +391,10 @@ def create_first_phase_zero_nastran_file(input_file_path, output_file_path):
         elif line.startswith('MAT1'):
             mat_id = int(line[8:16].strip())
             mat1_card_dict[mat_id] = line.strip()
+
+    reserve_shared_edge_data_csv = base_name + '_reserve_shared_edge_data.csv'
+    rename_old_filename(reserve_shared_edge_data_csv)
+    om.restore_shared_edges_dict(edge_dict, reserve_shared_edge_data_csv)
 
     new_content = []
 
@@ -617,6 +673,100 @@ def run_nastran(dat_file_name, nastran_exe_path):
         return 2
     return 0
 
+def create_excel_with_chart(optimize_time_dict, optimize_elem_num_dict, excel_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "最適化データまとめ"
+
+    ws.append(["最適化数", "最適化処理時間（秒）", "最適化要素数"])
+
+    for key in sorted(optimize_time_dict.keys()):
+        ws.append([key + 1, optimize_time_dict[key], optimize_elem_num_dict[key]])
+
+    data_length = len(optimize_time_dict)
+
+    # 最適化処理時間用の棒グラフを作成
+    line_Chart = LineChart()
+    line_Chart.title = "最適化"
+    line_Chart.y_axis.title = "最適化処理時間（秒）"  # 左側Y軸
+    line_Chart.x_axis.title = "最適化数"
+
+    data = Reference(ws, min_col=2, min_row=1, max_row=data_length + 1, max_col=2)
+    categories = Reference(ws, min_col=1, min_row=2, max_row=data_length + 1)  # 最適化数
+    line_Chart.add_data(data, titles_from_data=True)
+    line_Chart.set_categories(categories)
+
+    # グラフの凡例を下側に配置
+    line_Chart.legend.position = 'b'
+
+    # X軸とY軸の目盛り表示
+    line_Chart.y_axis.majorTickMark = "out"  # 左側Y軸の目盛り
+    line_Chart.x_axis.majorTickMark = "out"  # X軸の目盛り
+    line_Chart.y_axis.majorGridlines = None  # グリッドラインなし
+
+    # 最適化要素数用の折れ線グラフを作成
+    bar_chart = BarChart()
+    bar_chart.y_axis.axId = 200  # 別のY軸（右側）を設定
+    bar_chart.title = None
+    bar_chart.y_axis.title = "最適化要素数"  # 右側Y軸
+    bar_chart.y_axis.crosses = "max"  # 右側の軸に配置
+    bar_chart.y_axis.majorTickMark = "out"  # 右側Y軸の目盛り
+    bar_chart.y_axis.majorGridlines = None  # グリッドラインなし
+
+    data = Reference(ws, min_col=3, min_row=1, max_row=data_length + 1, max_col=3)
+    bar_chart.add_data(data, titles_from_data=True)
+
+    # 2軸グラフの作成（左：最適化処理時間、右：最適化要素数）
+    line_Chart += bar_chart
+    ws.add_chart(line_Chart, "E5")
+
+    wb.save(excel_path)
+
+def get_density_dict_from_csv(csv_path, phase_idx):
+    result_dict = {}
+    with open(csv_path, mode='r') as file:
+        reader = csv.reader(file)
+        for row in reader:
+            key = int(row[0])
+            value = float(row[phase_idx - 1])
+            result_dict[key] = value
+    return result_dict
+
+def calculate_checker_flag_cost_value(
+        checker_cost_dict,
+        first_density,
+        phase_num,
+        density_increment,
+        cost_efficient
+):
+    C_i_dict = {}
+    J_i_dict = defaultdict(float) 
+    density_dict = None
+    if phase_num > 1:
+        base_name, _ = os.path.splitext(sys.argv[1])
+        density_csv = base_name + '_for_restore_density.csv'
+        density_dict = get_density_dict_from_csv(density_csv, phase_num)
+    for elem_id, adjoint_elem_ids in om._shared_edge_element_dict.items():
+        m_i = len(adjoint_elem_ids)
+        previous_rho_i = density_dict[elem_id] if phase_num > 1 else first_density
+        sum_previous_rho_j = 0.0
+        for j in adjoint_elem_ids:
+            previous_rho_j = density_dict[j] if phase_num > 1 else first_density
+            sum_previous_rho_j += previous_rho_j
+            J_i_dict[j] += (4 * pow(previous_rho_i, 2) - 2) * density_increment * previous_rho_j
+        C_i_dict[elem_id] = (4 * sum_previous_rho_j - m_i * (m_i + 1)) * density_increment * previous_rho_i
+    checker_energy_list_for_scale = []
+    for idx, _ in C_i_dict.items():
+        sum_i = C_i_dict[idx] + J_i_dict[idx]
+        checker_energy_list_for_scale.append(sum_i)
+        checker_energy_list_for_scale.append(sum_i * -1.0)
+    std_energy = np.std(checker_energy_list_for_scale)
+    num_elem = len(C_i_dict)
+    for idx, _ in C_i_dict.items():
+        sum_i = C_i_dict[idx] + J_i_dict[idx]
+        cost_val = cost_efficient * sum_i / (3.0 * np.sqrt(num_elem) * std_energy)
+        checker_cost_dict[idx] = cost_val
+
 def calculate_ising_part(
         elem, 
         initial_thickness_youngsmodulus, 
@@ -738,7 +888,7 @@ def write_data_to_csv_for_check_ising_val(csv_file_name, return_value_dict, phas
         writer = csv.writer(csvfile)
         writer.writerows(reader)
 
-def write_data_to_csv_youngsmodulus(csv_file_name, mat_thickness_youngmodulus_temp, phase_num):
+def write_data_to_csv(csv_file_name, restore_dict, phase_num):
     file_exists = os.path.isfile(csv_file_name)
     
     if file_exists:
@@ -757,11 +907,10 @@ def write_data_to_csv_youngsmodulus(csv_file_name, mat_thickness_youngmodulus_te
             # 必要な列まで拡張し、初期値を0に設定
             data[row_index].extend([0] * (phase_num - len(data[row_index]) + 1))
         # すでに存在する行の指定された列（phase_num）の初期値を0にする
-        if key not in mat_thickness_youngmodulus_temp:
+        if key not in restore_dict:
             data[row_index][phase_num] = 0
 
-    # mat_thickness_youngmodulus_tempのキーを処理
-    keys = list(mat_thickness_youngmodulus_temp.keys())
+    keys = list(restore_dict.keys())
     for key in keys:
         if key in existing_keys:
             row_index = existing_keys[key]
@@ -771,7 +920,7 @@ def write_data_to_csv_youngsmodulus(csv_file_name, mat_thickness_youngmodulus_te
             data.append([key] + [0] * phase_num)
         
         # 指定された列(phase_num)の値を更新
-        data[row_index][phase_num] = mat_thickness_youngmodulus_temp[key]
+        data[row_index][phase_num] = restore_dict[key]
 
     # CSVファイルにデータを書き込む
     with open(csv_file_name, mode='w', newline='', encoding='utf-8') as file:
@@ -786,6 +935,24 @@ def calc_hamiltonian_energy(sigma, h, J):
         for j in range(i + 1, len(sigma)):
             energy += J[i, j] * sigma[i] * sigma[j]
     return energy
+
+def do_openJij_single_optimize(
+        h,
+        J,
+        S_minus_1,
+        S_plus_1
+):
+    sampler = oj.SQASampler()
+    response = sampler.sample_ising(h, J, num_reads=100)
+    # response = sampler.sample_ising(h, J)
+    logging.debug(f"OpenJijの最適化結果の生データ：{response.states}")
+
+    sample = response.first.sample
+    for k, v in sample.items():
+        if v == -1:
+            S_minus_1.append(k)
+        if v == 1:
+            S_plus_1.append(k)
 
 def do_simulated_annealing_single_optimize(
         h,
@@ -928,6 +1095,9 @@ def do_single_optimize(
         temp_threshold = float(1e-3) # 温度が最終的に0.001度になるようにする
         cooling_rate = float((temp_threshold / initial_temp) ** (1.0 / max_iter))
         do_simulated_annealing_single_optimize(h, J, initial_temp, cooling_rate, max_iter, S_minus_1, S_plus_1)
+    elif s_optimize_rule.startswith("openJij"):
+        do_openJij_single_optimize(h, J, S_minus_1, S_plus_1)
+    
     minus_vol = 0.0
     plus_vol = 0.0
 
@@ -985,9 +1155,13 @@ def main():
 
     # 途中からの実行に対応
     if start_phase_num >= 1:
-        base_name, ext = os.path.splitext(sys.argv[1])
+        base_name, _ = os.path.splitext(sys.argv[1])
+        # 初期ヤング率データの読み込み
         reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
         om.load_thickness_youngsmodulus_data_from_csv(reserve_data_csv)
+        # エッジの共有している要素情報の読み込み
+        reserve_data_2_csv = base_name + '_reserve_shared_edge_data.csv'
+        om.load_shared_elements_dict_from_csv(reserve_data_2_csv)
 
     for i in range(start_phase_num, loop_num):
         phase_num = i + 1
@@ -997,9 +1171,17 @@ def main():
         if result == -1:
             logging.error(f"{phase_num}/{loop_num}の処理で失敗しました")
             print(f"{phase_num}/{loop_num}の処理で失敗しました")
+            break
         if result == 1:
             logging.info(f"{phase_num}/{loop_num}で、最適化を完了しました")
             print(f"{phase_num}/{loop_num}で、最適化を完了しました")
+            break
+
+    b_for_debug = om.get_from_flag_data_list(4)
+    if b_for_debug:
+        base_name, _ = os.path.splitext(sys.argv[1])
+        optimize_data_xlsx = base_name + '_optimize_data_graph.xlsx'
+        create_excel_with_chart(om._optimize_time_dict, om._optimize_elem_num_dict, optimize_data_xlsx)
 
 def main2(phase_num):
     dat_file_path = sys.argv[1]
@@ -1062,6 +1244,7 @@ def main2(phase_num):
                     thickness = safe_float_conv(line[24:32].strip())
                     initial_thickness_temp = om.get_from_thickness_youngsmodulus_data_dict(elem_id)
                     if check_skip_optimize(thickness, initial_thickness_temp, threshold, phase_num):
+                        om._density_remain[str(elem_id)] = 1.0
                         om._mat_thickness_youngmodulus_remain[str(elem_id)] = initial_thickness_temp
                         b_skip_optimize_psolid_pshell = True
                 if not b_skip_optimize_psolid_pshell:
@@ -1073,6 +1256,7 @@ def main2(phase_num):
                 b_skip_optimize_mat1 = False
                 if not b_use_thickness:
                     if check_skip_optimize(youngmodulus, initial_youngsmodulus_temp, threshold, phase_num):
+                        om._density_remain[str(mat_id)] = 1.0
                         om._mat_thickness_youngmodulus_remain[str(mat_id)] = initial_youngsmodulus_temp
                         b_skip_optimize_mat1 = True
                 if b_skip_optimize_mat1:
@@ -1100,6 +1284,7 @@ def main2(phase_num):
                             logging.debug(f"要素{elem_id}は節点{x}を持ち、この節点はFORCEカードで荷重がかかっているため、最適化の対象から外します（残ることが確定）。")
                             b_is_remain_elem_forcely = True
                             initial_thickness_youngsmodulus_temp = om.get_from_thickness_youngsmodulus_data_dict(elem_id)
+                            om._density_remain[str(elem_id)] = 1.0
                             om._mat_thickness_youngmodulus_remain[str(elem_id)] = initial_thickness_youngsmodulus_temp
                             break
                     if b_is_remain_elem_forcely:
@@ -1126,6 +1311,7 @@ def main2(phase_num):
             logging.debug(f"eid={eid}の要素のvon mises応力値{von_mises}が、基準値として指定した{upper_limit_of_stress}を超えたためにこの要素の最適化をスキップします。")
             mat_value = mat1_dict[eid]
             thickness_youngmodulus_temp = thickness if b_use_thickness else mat_value[0]
+            om._density_remain[str(eid)] = 1.0
             om._mat_thickness_youngmodulus_remain[str(eid)] = thickness_youngmodulus_temp
             continue
 
@@ -1168,7 +1354,6 @@ def main2(phase_num):
             node_value_dict['y'] = node_value[1]
             node_value_dict['z'] = node_value[2]
             node_data.append(node_value_dict)
-
         merged_dict['node_data'] = node_data
         volume = 0.0
         if is_solid_flag:
@@ -1194,7 +1379,7 @@ def main2(phase_num):
         merged_elem_list.append(merged_dict)
 
     if phase_num == 1:
-        base_name, ext = os.path.splitext(dat_file_path)
+        base_name, _ = os.path.splitext(dat_file_path)
         reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
         new_row = ['First_sum_volume', sum_volume_pre]
         om.update_thickness_youngsmodulus_csv(reserve_data_csv, 2, new_row)
@@ -1209,6 +1394,16 @@ def main2(phase_num):
     energy_list_for_scale = []
     volume_list_for_scale = []
 
+    checker_cost_dict = {}
+    b_use_checker_flag_avoid_func = False if str(sys.argv[17]) == "0" else True
+    cost_efficient = sys.argv[18]
+    calculate_checker_flag_cost_value(
+        checker_cost_dict,
+        target_thickness_density_percentage,
+        phase_num,
+        density_increment,
+        cost_efficient)
+
     # b_use_thicknessの時は、density_power=0とした相当の動作をするケースのための変数
     density_power_calc = 0 if b_use_thickness else density_power
 
@@ -1218,7 +1413,7 @@ def main2(phase_num):
         eid = int(elem.get('eid', 0))
         initial_thickness_youngsmodulus = om.get_from_thickness_youngsmodulus_data_dict(eid)
         volume = float(elem.get('volume', 0))
-        return_value = [] # [alpha_value, beta_value, kappa_i, energy_part]
+        return_value = [] # [alpha_value, beta_value, kappa_i, von_mises, energy_part]
         calculate_ising_part(elem,
                              initial_thickness_youngsmodulus,
                              volume,
@@ -1245,8 +1440,8 @@ def main2(phase_num):
 
     ising_index_eid_map = {}
     nInternalid = len(merged_elem_list)
-    h = defaultdict(int)
-    J = defaultdict(int)
+    h = {}
+    J = {}
     cost_lambda_calc = cost_lambda
     cost_lambda_calc_multiply = (1 + 5 ** 0.5) / 2  # 黄金比
     old_cost_lambda =  om.get_cost_lambda()
@@ -1262,6 +1457,9 @@ def main2(phase_num):
         h_first = (k_0 * return_val[2]) / (3.0 * np.sqrt(nInternalid) * std_of_energy_list)
         # h_first = (k_0 * return_val[2]) / (2.0 * np.sqrt(nInternalid) * std_of_energy_list)
         h[index] = h_first
+        if b_use_checker_flag_avoid_func:
+            checker_cost = checker_cost_dict[eid]
+            h[index] += checker_cost
         return_val.append(h_first)
 
         for j_index in range(index + 1, nInternalid):
@@ -1335,13 +1533,15 @@ def main2(phase_num):
             return_val = return_value_dict[eid]
             return_val.append(ising_val)
 
-        base_name, ext = os.path.splitext(sys.argv[1])
+        base_name, _ = os.path.splitext(sys.argv[1])
         h_first_and_von_mises_csv = base_name + '_for_debug_return_value.csv'
         if phase_num == 1:
             rename_old_filename(h_first_and_von_mises_csv)
         write_data_to_csv_for_check_ising_val(h_first_and_von_mises_csv, return_value_dict, phase_num)
 
     elapsed_time_3 = time.time() - start_time_3
+    om._optimize_time_dict[phase_num - 1] = elapsed_time_3
+    om._optimize_elem_num_dict[phase_num - 1] = nInternalid
     logging.info(f"{phase_num}回目の最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
     print(f"{phase_num}回目の最適化が終わりました。")
     print(f"最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
@@ -1349,6 +1549,7 @@ def main2(phase_num):
     start_time_4 = time.time()
 
     mat_thickness_youngmodulus = {}
+    density_dict = {}
     zero_fix_density_index_list = []
     
     for index, elem in enumerate(merged_elem_list):
@@ -1379,6 +1580,7 @@ def main2(phase_num):
                 b_use_thickness_youngmodulus = False
 
         if b_use_thickness_youngmodulus == True:
+            density_dict[str(eid)] = dens_value
             if b_use_thickness:
                 mat_thickness_youngmodulus[str(eid)] = dens_value * initial_thickness_youngsmodulus
             else:
@@ -1474,14 +1676,20 @@ def main2(phase_num):
     else:
         rename_file(new_dat_temp_file_name, new_dat_file_name)
 
+    base_name, _ = os.path.splitext(sys.argv[1])
+    density_csv = base_name + '_for_restore_density.csv'
+    if phase_num == 1:
+        rename_old_filename(density_csv)
+    merged_density_dict = {**density_dict, **(om._density_remain)}
+    sorted_density_dict = dict(sorted(merged_density_dict.items(), key=lambda item: int(item[0])))
+    write_data_to_csv(density_csv, sorted_density_dict, phase_num)
     if b_for_debug:
-        base_name, ext = os.path.splitext(sys.argv[1])
         youngmodulus_csv = base_name + '_for_debug_youngsmodulus.csv'
         if phase_num == 1:
             rename_old_filename(youngmodulus_csv)
         merged_mat_thickness_youngmodulus = {**mat_thickness_youngmodulus, **(om._mat_thickness_youngmodulus_remain)}
         sorted_mat_thickness_youngmodulus = dict(sorted(merged_mat_thickness_youngmodulus.items(), key=lambda item: int(item[0])))
-        write_data_to_csv_youngsmodulus(youngmodulus_csv, sorted_mat_thickness_youngmodulus, phase_num)
+        write_data_to_csv(youngmodulus_csv, sorted_mat_thickness_youngmodulus, phase_num)
 
     logging.info(f"最適化後のdatファイル名：{new_dat_file_name}")
 
@@ -1520,14 +1728,16 @@ if __name__ == '__main__':
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 4,    ### cost_lambda
-                30,   ### loop_num
+                1,   ### loop_num
                 1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
                 20000,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
-                "sa-1000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000")
+                "openJij",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij"
+                1,
+                0.3,  ### cost_efficient
             ]
     setup_logging(sys.argv[3])
     logging.info("\n\n")
