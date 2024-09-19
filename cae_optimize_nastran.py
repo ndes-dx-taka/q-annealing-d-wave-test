@@ -2,7 +2,7 @@
 # 開発ネットワークでの連続実行では下記。
 flag_data_list = [True, False, True, True, True]
 # nastranがない場合のデバッグ時は下記
-flag_data_list = [True, True, True, False, True]
+# flag_data_list = [True, False, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -74,6 +74,7 @@ class OptimizeManager:
         self._shared_edge_element_dict = defaultdict(set)
         self._optimize_time_dict = {}
         self._optimize_elem_num_dict = {}
+        self._optimize_lambda_check_num_dict = {}
     
     def get_from_flag_data_list(self, index):
         return self._flag_data_list[index]
@@ -673,15 +674,15 @@ def run_nastran(dat_file_name, nastran_exe_path):
         return 2
     return 0
 
-def create_excel_with_chart(optimize_time_dict, optimize_elem_num_dict, excel_path):
+def create_excel_with_chart(optimize_time_dict, optimize_elem_num_dict, optimize_lambda_check_num_dict, excel_path):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "最適化データまとめ"
 
-    ws.append(["最適化数", "最適化処理時間（秒）", "最適化要素数"])
+    ws.append(["最適化数", "最適化処理時間（秒）", "最適化要素数", "λ調整のための最適化試行回数"])
 
     for key in sorted(optimize_time_dict.keys()):
-        ws.append([key + 1, optimize_time_dict[key], optimize_elem_num_dict[key]])
+        ws.append([key + 1, optimize_time_dict[key], optimize_elem_num_dict[key], optimize_lambda_check_num_dict[key]])
 
     data_length = len(optimize_time_dict)
 
@@ -718,7 +719,7 @@ def create_excel_with_chart(optimize_time_dict, optimize_elem_num_dict, excel_pa
 
     # 2軸グラフの作成（左：最適化処理時間、右：最適化要素数）
     line_Chart += bar_chart
-    ws.add_chart(line_Chart, "E5")
+    ws.add_chart(line_Chart, "F5")
 
     wb.save(excel_path)
 
@@ -1181,7 +1182,8 @@ def main():
     if b_for_debug:
         base_name, _ = os.path.splitext(sys.argv[1])
         optimize_data_xlsx = base_name + '_optimize_data_graph.xlsx'
-        create_excel_with_chart(om._optimize_time_dict, om._optimize_elem_num_dict, optimize_data_xlsx)
+        rename_old_filename(optimize_data_xlsx)
+        create_excel_with_chart(om._optimize_time_dict, om._optimize_elem_num_dict, om._optimize_lambda_check_num_dict, optimize_data_xlsx)
 
 def main2(phase_num):
     dat_file_path = sys.argv[1]
@@ -1396,7 +1398,7 @@ def main2(phase_num):
 
     checker_cost_dict = {}
     b_use_checker_flag_avoid_func = False if str(sys.argv[17]) == "0" else True
-    cost_efficient = sys.argv[18]
+    cost_efficient = float(sys.argv[18])
     calculate_checker_flag_cost_value(
         checker_cost_dict,
         target_thickness_density_percentage,
@@ -1459,7 +1461,7 @@ def main2(phase_num):
         h[index] = h_first
         if b_use_checker_flag_avoid_func:
             checker_cost = checker_cost_dict[eid]
-            h[index] += checker_cost
+            h[index] -= checker_cost
         return_val.append(h_first)
 
         for j_index in range(index + 1, nInternalid):
@@ -1487,9 +1489,9 @@ def main2(phase_num):
     b_for_debug = om.get_from_flag_data_list(4)
     b_do_optimize = om.get_from_flag_data_list(0)
     inverse_ising_index_eid_map = {value: key for key, value in ising_index_eid_map.items()}
+    n_optimize_num = 1
     if b_do_optimize and not b_fin_optimize:
         b_do_single_optimize = True
-        n_optimize_num = 1
         while b_do_single_optimize:
             if n_optimize_num >= 5:
                 print("試行回数が5回を超えたため、最適化を進めます。")
@@ -1542,6 +1544,7 @@ def main2(phase_num):
     elapsed_time_3 = time.time() - start_time_3
     om._optimize_time_dict[phase_num - 1] = elapsed_time_3
     om._optimize_elem_num_dict[phase_num - 1] = nInternalid
+    om._optimize_lambda_check_num_dict[phase_num - 1] = n_optimize_num
     logging.info(f"{phase_num}回目の最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
     print(f"{phase_num}回目の最適化が終わりました。")
     print(f"最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
@@ -1728,14 +1731,14 @@ if __name__ == '__main__':
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 4,    ### cost_lambda
-                1,   ### loop_num
+                30,   ### loop_num
                 1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
-                20000,  ### upper_limit_of_stress
+                300,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
-                "openJij",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij"
+                "sa-10000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij"
                 1,
                 0.3,  ### cost_efficient
             ]
