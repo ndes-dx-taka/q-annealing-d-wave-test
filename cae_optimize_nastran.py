@@ -2,7 +2,7 @@
 # 開発ネットワークでの連続実行では下記。
 flag_data_list = [True, False, True, True, True]
 # nastranがない場合のデバッグ時は下記
-# flag_data_list = [True, False, True, False, True]
+flag_data_list = [True, True, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -944,11 +944,18 @@ def do_openJij_single_optimize(
         S_plus_1
 ):
     sampler = oj.SQASampler()
-    response = sampler.sample_ising(h, J, num_reads=100)
+    sampleset = sampler.sample_ising(h, J, num_reads=100)
     # response = sampler.sample_ising(h, J)
-    logging.debug(f"OpenJijの最適化結果の生データ：{response.states}")
+    logging.debug(f"OpenJijの最適化結果の生データ：{sampleset.states}")
 
-    sample = response.first.sample
+    # for datum in sampleset.data(fields=['sample', 'energy']):   
+    #     print(datum)
+    # first_energy = sampleset.first.energy
+    # print(f"first energy is {first_energy}")
+    # for energy, in sampleset.data(fields=['energy'], sorted_by='energy'):
+    #     print(f"all energy is {energy}")
+
+    sample = sampleset.first.sample
     for k, v in sample.items():
         if v == -1:
             S_minus_1.append(k)
@@ -1063,7 +1070,8 @@ def do_dwave_single_optimize(
     response = sampler.sample_ising(h, J)
     logging.debug(f"D-waveの最適化結果の生データ：{response.record}")
 
-    sample = next(response.data(fields=['sample']))
+    # sample = next(response.data(fields=['sample']))
+    sample = response.first.sample
     for k, v in sample.items():
         if v == -1:
             S_minus_1.append(k)
@@ -1096,7 +1104,7 @@ def do_single_optimize(
         temp_threshold = float(1e-3) # 温度が最終的に0.001度になるようにする
         cooling_rate = float((temp_threshold / initial_temp) ** (1.0 / max_iter))
         do_simulated_annealing_single_optimize(h, J, initial_temp, cooling_rate, max_iter, S_minus_1, S_plus_1)
-    elif s_optimize_rule.startswith("openJij"):
+    elif s_optimize_rule == "openJij":
         do_openJij_single_optimize(h, J, S_minus_1, S_plus_1)
     
     minus_vol = 0.0
@@ -1544,7 +1552,7 @@ def main2(phase_num):
     elapsed_time_3 = time.time() - start_time_3
     om._optimize_time_dict[phase_num - 1] = elapsed_time_3
     om._optimize_elem_num_dict[phase_num - 1] = nInternalid
-    om._optimize_lambda_check_num_dict[phase_num - 1] = n_optimize_num
+    om._optimize_lambda_check_num_dict[phase_num - 1] = n_optimize_num - 1
     logging.info(f"{phase_num}回目の最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
     print(f"{phase_num}回目の最適化が終わりました。")
     print(f"最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
@@ -1721,7 +1729,8 @@ if __name__ == '__main__':
     if b_is_set_sys_argv_on_program:
             sys.argv = [
                 "cae_optimize_nastran.py", 
-                "C:\\work\\github\\q-annealing-d-wave-test\\test2-sa-shell1.dat",
+                # "C:\\work\\github\\q-annealing-d-wave-test\\test2-sa-shell1.dat",
+                "C:\\work\\github\\q-annealing-d-wave-test\\test.dat",
                 # "C:\\work\\github\\q-annealing-d-wave-test\\test2-shell2.dat",
                 # "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.dat",
                 "notuse",
@@ -1738,7 +1747,7 @@ if __name__ == '__main__':
                 0,    ### finish_elem_num
                 300,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
-                "sa-10000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij"
+                "sa-1000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij"
                 1,
                 0.3,  ### cost_efficient
             ]
