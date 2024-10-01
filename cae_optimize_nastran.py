@@ -15,14 +15,19 @@ import logging
 # }
 log_level = logging.DEBUG
 
+from amplify import BinaryQuadraticModel, Solver, decode_solution, VariableGenerator, solve
+from amplify.client import FixstarsClient
 from collections import defaultdict
 import csv
 import copy
 # from dwave.system.samplers import DWaveSampler
 # from dwave.system.composites import EmbeddingComposite
 from dwave.system import LeapHybridSampler
+from functools import partial
+import matplotlib.pyplot as plt
 import numpy as np
 import openjij as oj
+import optuna
 import os
 import openpyxl
 from openpyxl.chart import BarChart, LineChart, Reference
@@ -57,6 +62,9 @@ def format_float_youngmodulus(value):
 def format_float_thickness(value):
     return "{:.2E}".format(value)
 
+def safe_get(arr, index):
+    return arr[index] if 0 <= index < len(arr) else ""
+
 class OptimizeManager:
     def __init__(self, flag_data_list=None, thickness_youngsmodulus_data_dict=None):
         if flag_data_list is None:
@@ -75,6 +83,8 @@ class OptimizeManager:
         self._optimize_time_dict = {}
         self._optimize_elem_num_dict = {}
         self._optimize_lambda_check_num_dict = {}
+        self._sa_initial_temp = -1.0
+        self._sa_cooling_rate = -1.0
     
     def get_from_flag_data_list(self, index):
         return self._flag_data_list[index]
@@ -941,11 +951,23 @@ def do_openJij_single_optimize(
         h,
         J,
         S_minus_1,
-        S_plus_1
+        S_plus_1,
+        n_sweeps,
+        optimize_type
 ):
-    sampler = oj.SQASampler()
-    sampleset = sampler.sample_ising(h, J, num_reads=100)
-    # response = sampler.sample_ising(h, J)
+    num_ising_jij = int(sys.argv[19])
+    sampler = None
+    sampleset = None
+    if optimize_type == "sqa":
+        sampler = oj.SQASampler()
+    elif optimize_type == "sa":
+        sampler = oj.SASampler()
+    elif optimize_type == "csqa":
+        sampler = oj.CSQASampler()
+        sampler.gamma = 1.0
+        # sampleset = sampler.sample_ising(h, J)
+    sampleset = sampler.sample_ising(h, J, num_sweeps=n_sweeps, num_reads=num_ising_jij)
+    
     logging.debug(f"OpenJijの最適化結果の生データ：{sampleset.states}")
 
     # for datum in sampleset.data(fields=['sample', 'energy']):   
@@ -961,6 +983,50 @@ def do_openJij_single_optimize(
             S_minus_1.append(k)
         if v == 1:
             S_plus_1.append(k)
+
+# 現状、correct_state(最適解)が分からないため、機能していない
+def do_benchmark_openjij(h, J, n_sweeps, optimize_type):
+    sampler = None
+    num_ising_jij = int(sys.argv[19])
+    if optimize_type == "sqa":
+        sampler = oj.SQASampler()
+    elif optimize_type == "sa":
+        sampler = oj.SASampler()
+    num_sweeps_list = [int(n_sweeps / 100), int(n_sweeps / 10), n_sweeps, (n_sweeps * 10),
+                       (n_sweeps * 100), (n_sweeps * 1000)]
+    correct_state = [(1 if random.random() < 0.5 else -1) for _ in range(len(h))]
+    # benchmark関数を用いてTTS, 残留エネルギー, 成功確率を計算します。
+    result = oj.solver_benchmark(
+                      solver=lambda time, **args: sampler.sample_ising(h,J,num_sweeps=time,num_reads=num_ising_jij), 
+                      time_list=num_sweeps_list, solutions=[correct_state], p_r=0.99
+            )
+    # 各種描画を行うための設定を行います。
+    fig, (axL, axC, axR) = plt.subplots(ncols=3, figsize=(15, 3))
+    plt.subplots_adjust(wspace=0.4)
+    fontsize = 10
+
+    # TTSを描画します。
+    axL.plot(result['time'], result['tts'], '-o')
+    axL.set_xlabel('annealing time', fontsize=fontsize)
+    axL.set_yscale("log")
+    axL.set_ylabel('TTS', fontsize=fontsize)
+
+    # 残留エネルギーを描画します。
+    axC.plot(result['time'], result['residual_energy'], '-o')
+    axC.set_xlabel('annealing time', fontsize=fontsize)
+    axC.set_ylabel('Residual energy', fontsize=fontsize)
+
+    # 最適解が出現した確率を描画します。
+    axR.plot(result['time'], result['success_prob'], '-o')
+    axR.set_xlabel('annealing time', fontsize=fontsize)
+    axR.set_ylabel('Success probability', fontsize=fontsize)
+
+    # レイアウトを自動調整してラベルが切れないようにする
+    plt.tight_layout()
+
+    # 画像ファイルとして保存
+    fig.savefig("plot_image.png")
+    plt.close(fig)  # メモリ解放のため閉じる
 
 def do_simulated_annealing_single_optimize(
         h,
@@ -1000,9 +1066,63 @@ def do_simulated_annealing_single_optimize(
             sigma[i] *= -1
         temperature *= cooling_rate
 
-    # check_energy = calc_hamiltonian_energy(best_sigma, h, J)
-
     for i, val in enumerate(best_sigma):
+        if val == -1:
+            S_minus_1.append(i)
+        elif val == 1:
+            S_plus_1.append(i)
+
+    check_energy = calc_hamiltonian_energy(best_sigma, h, J)
+    return check_energy
+
+def optimize_parameters(trial, h, J, max_iter):
+    # 初期温度と冷却率のパラメータ範囲を設定
+    initial_temp = trial.suggest_float('initial_temp', 1, 100)
+    cooling_rate = trial.suggest_float('cooling_rate', 0.9999, 0.9999999999)
+    S_minus_1 = []
+    S_plus_1 = []
+
+    best_energy = do_simulated_annealing_single_optimize(h, J, initial_temp, cooling_rate, max_iter, S_minus_1, S_plus_1)
+
+    return best_energy
+
+def do_amplify_single_optimize(
+        h,
+        J,
+        S_minus_1,
+        S_plus_1
+):
+    # VariableGenerator を使ってスピン変数を生成
+    gen = VariableGenerator()
+    num_spins = len(h)
+    spins = gen.array("Ising", num_spins)
+
+    # ハミルトニアンの構築
+    energy_h = sum(h[i] * spins[i] for i in h)
+    # 相互作用部分の計算 (i < j の場合のみ)
+    energy_J = 0
+    for i in range(num_spins):
+        for j in range(i + 1, num_spins):
+            if (i, j) in J:
+                energy_J += J[(i, j)] * spins[i] * spins[j]
+    energy = energy_h + energy_J
+
+    # ソルバーの設定
+    client = FixstarsClient()
+    api_token = os.getenv('AMPLIFY_TOKEN')
+    if not api_token:
+        api_token = sys.argv[21]
+    client.token = api_token
+    client.parameters.timeout = 1000
+
+    # ソルバーを実行
+    result = solve(energy, client)
+
+    # 結果の解析
+    solution = result[0].values
+    decoded_solution = decode_solution(spins, solution)
+
+    for i, val in enumerate(decoded_solution):
         if val == -1:
             S_minus_1.append(i)
         elif val == 1:
@@ -1098,14 +1218,35 @@ def do_single_optimize(
         do_dwave_single_optimize(h, J, S_minus_1, S_plus_1)
     elif s_optimize_rule == "qiskit":
         do_qiskit_single_optimize(h, J, S_minus_1, S_plus_1)
+    elif s_optimize_rule == "amplify":
+        do_amplify_single_optimize(h, J, S_minus_1, S_plus_1)
     elif s_optimize_rule.startswith("sa-"):
-        initial_temp = 10
+        initial_temp = om._sa_initial_temp
+        cooling_rate = om._sa_cooling_rate
         max_iter = int(s_optimize_rule.split('-')[1])
-        temp_threshold = float(1e-3) # 温度が最終的に0.001度になるようにする
-        cooling_rate = float((temp_threshold / initial_temp) ** (1.0 / max_iter))
+        b_sa_optimize_param = False if str(sys.argv[20]) == "0" else True
+        if not b_sa_optimize_param:
+            initial_temp = 10
+            temp_threshold = float(1e-3) # 温度が最終的に0.001度になるようにする
+            cooling_rate = float((temp_threshold / initial_temp) ** (1.0 / max_iter))
+        if initial_temp < 0 and cooling_rate < 0:
+            optimize_func = partial(optimize_parameters, h=h, J=J, max_iter=max_iter)
+            study = optuna.create_study(direction='minimize')
+            study.optimize(optimize_func, timeout=3600)
+            initial_temp = study.best_params['initial_temp']
+            cooling_rate = study.best_params['cooling_rate']
+            om._sa_initial_temp = initial_temp
+            om._sa_cooling_rate = cooling_rate
+        logging.debug(f"sa法のinitial_temp:{initial_temp}, cooling_rate:{cooling_rate}")
         do_simulated_annealing_single_optimize(h, J, initial_temp, cooling_rate, max_iter, S_minus_1, S_plus_1)
-    elif s_optimize_rule == "openJij":
-        do_openJij_single_optimize(h, J, S_minus_1, S_plus_1)
+    elif s_optimize_rule.startswith("openJij-"):
+        optimize_rule_arr = s_optimize_rule.split('-')
+        optimize_type = safe_get(optimize_rule_arr, 1)
+        n_sweeps = int(safe_get(optimize_rule_arr, 2))
+        do_openJij_single_optimize(h, J, S_minus_1, S_plus_1, n_sweeps, optimize_type)
+        benchmark = safe_get(optimize_rule_arr, 3)
+        if benchmark == "benchmark":
+            do_benchmark_openjij(h, J, n_sweeps, optimize_type)
     
     minus_vol = 0.0
     plus_vol = 0.0
@@ -1730,9 +1871,9 @@ if __name__ == '__main__':
             sys.argv = [
                 "cae_optimize_nastran.py", 
                 # "C:\\work\\github\\q-annealing-d-wave-test\\test2-sa-shell1.dat",
-                "C:\\work\\github\\q-annealing-d-wave-test\\test.dat",
+                # "C:\\work\\github\\q-annealing-d-wave-test\\test.dat",
                 # "C:\\work\\github\\q-annealing-d-wave-test\\test2-shell2.dat",
-                # "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.dat",
+                "C:\\work\\github\\q-annealing-d-wave-test\\test-shell1.dat",
                 "notuse",
                 "C:\\work\\github\\q-annealing-d-wave-test\\cae_opti_vscode_debug.log",
                 "C:\\MSC.Software\\MSC_Nastran\\20122\\bin\\nastranw.exe",
@@ -1740,16 +1881,19 @@ if __name__ == '__main__':
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 4,    ### cost_lambda
-                30,   ### loop_num
+                1,   ### loop_num
                 1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
                 300,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
-                "sa-1000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij"
-                1,
-                0.3,  ### cost_efficient
+                "amplify",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij"
+                1,  ### USE_CHECKER_FLAG_AVOID_FUNC
+                0.3,  ### CHECKER_COST_EFFICIENT
+                1,  ### OPENJIJ_NUM_READS
+                1,  ### OPTIMIZE_SA_PARAM
+                ""  ### AMPLIFY_TOKEN
             ]
     setup_logging(sys.argv[3])
     logging.info("\n\n")
