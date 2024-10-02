@@ -2,7 +2,7 @@
 # 開発ネットワークでの連続実行では下記。
 flag_data_list = [True, False, True, True, True]
 # nastranがない場合のデバッグ時は下記
-flag_data_list = [True, True, True, False, True]
+# flag_data_list = [True, False, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -938,6 +938,21 @@ def write_data_to_csv(csv_file_name, restore_dict, phase_num):
         writer = csv.writer(file)
         writer.writerows(data)
 
+def write_time_data_to_csv(time_csv, phase_num, elapsed_time, nInternalid, n_optimize_num):
+    # ファイルが存在しないか、phase_numが1の場合、新規にファイルを作成
+    if phase_num == 1 or not os.path.exists(time_csv):
+        # 新規にCSVファイルを作成し、UTF-8 with BOM でヘッダーを追加
+        with open(time_csv, mode='w', newline='', encoding='utf-8-sig') as file:
+            writer = csv.writer(file)
+            # ヘッダーの追加
+            writer.writerow(["最適化数", "最適化処理時間（秒）", "最適化要素数", "λ調整のための最適化試行回数"])
+    
+    # CSVファイルにデータを追記
+    with open(time_csv, mode='a', newline='', encoding='utf-8-sig') as file:
+        writer = csv.writer(file)
+        # phase_num行目にデータを追加
+        writer.writerow([phase_num, elapsed_time, nInternalid, n_optimize_num])
+
 def calc_hamiltonian_energy(sigma, h, J):
     energy = 0
     for i in range(len(sigma)):
@@ -1694,6 +1709,12 @@ def main2(phase_num):
     om._optimize_time_dict[phase_num - 1] = elapsed_time_3
     om._optimize_elem_num_dict[phase_num - 1] = nInternalid
     om._optimize_lambda_check_num_dict[phase_num - 1] = n_optimize_num - 1
+    base_name, _ = os.path.splitext(sys.argv[1])
+    time_csv = base_name + '_for_restore_time.csv'
+    if phase_num == 1:
+        rename_old_filename(time_csv)
+    write_time_data_to_csv(time_csv, phase_num, elapsed_time_3, nInternalid, (n_optimize_num - 1))
+
     logging.info(f"{phase_num}回目の最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
     print(f"{phase_num}回目の最適化が終わりました。")
     print(f"最適化処理の実行と集計にかかった時間：{str(elapsed_time_3)} [s]")
@@ -1828,7 +1849,6 @@ def main2(phase_num):
     else:
         rename_file(new_dat_temp_file_name, new_dat_file_name)
 
-    base_name, _ = os.path.splitext(sys.argv[1])
     density_csv = base_name + '_for_restore_density.csv'
     if phase_num == 1:
         rename_old_filename(density_csv)
