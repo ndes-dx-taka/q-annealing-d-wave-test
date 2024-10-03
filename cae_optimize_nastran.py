@@ -2,7 +2,7 @@
 # 開発ネットワークでの連続実行では下記。
 flag_data_list = [True, False, True, True, True]
 # nastranがない場合のデバッグ時は下記
-# flag_data_list = [True, False, True, False, True]
+flag_data_list = [True, True, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -31,6 +31,9 @@ import optuna
 import os
 import openpyxl
 from openpyxl.chart import BarChart, LineChart, Reference
+import pennylane as qml
+from pennylane import numpy as np
+from pennylane.optimize import NesterovMomentumOptimizer, AdamOptimizer, SPSAOptimizer
 # import pprint
 # from qiskit_optimization.algorithms import MinimumEigenOptimizer, ADMMParameters, ADMMOptimizer
 # from qiskit_algorithms import NumPyMinimumEigensolver
@@ -1143,6 +1146,62 @@ def do_amplify_single_optimize(
         elif val == 1:
             S_plus_1.append(i)
 
+def do_vqe_single_optimize(h, J, S_minus_1, S_plus_1, max_iter):
+    coeffs = []
+    obs = []
+    for i in h:
+        coeffs.append(h[i])
+        obs.append(qml.PauliZ(i))
+    for (i, j), Jij in J.items():
+        coeffs.append(Jij)
+        obs.append(qml.PauliZ(i) @ qml.PauliZ(j))
+    hamiltonian = qml.Hamiltonian(coeffs, obs)
+    num_qubits = len(h)
+    dev = qml.device('default.qubit', wires=num_qubits)
+
+    def vqe_ansatz(params):
+        for i in range(num_qubits):
+            qml.RY(params[i], wires=i)
+        for i in range(num_qubits - 1):
+            qml.CNOT(wires=[i, i + 1])
+    
+    @qml.qnode(dev)
+    def vqe_circuit(params):
+        vqe_ansatz(params)
+        return qml.expval(hamiltonian)
+    
+    def cost(params):
+        return vqe_circuit(params)
+    
+    # 各イジング変数（スピン）の期待値を取得する
+    @qml.qnode(dev)
+    def get_spin_values(params):
+        vqe_ansatz(params)
+        return [qml.expval(qml.PauliZ(i)) for i in range(num_qubits)]
+    
+    init_params = np.random.uniform(0, np.pi, num_qubits)
+
+    # optimizer = NesterovMomentumOptimizer(stepsize=0.1)
+    optimizer = AdamOptimizer(stepsize=0.001)
+    # optimizer = SPSAOptimizer(maxiter=100)
+
+    # VQEの実行
+    params = init_params
+    log_span = int(max_iter / 1000)
+    for i in range(max_iter):
+        params = optimizer.step(cost, params)
+        energy = cost(params)
+        if (i+1) % log_span == 0:
+            logging.debug(f'VQE Step {i+1}: Energy = {energy:.6f}')
+            print(f'VQE Step {i+1}: Energy = {energy:.6f}')
+
+    spin_values = get_spin_values(params)
+    for i, val in enumerate(spin_values):
+        if val < 0:
+            S_minus_1.append(i)
+        else:
+            S_plus_1.append(i)
+
 def do_qiskit_single_optimize(
         h,
         J,
@@ -1235,6 +1294,9 @@ def do_single_optimize(
         do_qiskit_single_optimize(h, J, S_minus_1, S_plus_1)
     elif s_optimize_rule == "amplify":
         do_amplify_single_optimize(h, J, S_minus_1, S_plus_1)
+    elif s_optimize_rule.startswith("vqe-"):
+        max_iter = int(s_optimize_rule.split('-')[1])
+        do_vqe_single_optimize(h, J, S_minus_1, S_plus_1, max_iter)
     elif s_optimize_rule.startswith("sa-"):
         initial_temp = om._sa_initial_temp
         cooling_rate = om._sa_cooling_rate
@@ -1908,7 +1970,7 @@ if __name__ == '__main__':
                 0,    ### finish_elem_num
                 300,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
-                "amplify",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij"
+                "vqe-100000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij", "amplify", "vqe-100000"
                 1,  ### USE_CHECKER_FLAG_AVOID_FUNC
                 0.3,  ### CHECKER_COST_EFFICIENT
                 1,  ### OPENJIJ_NUM_READS
