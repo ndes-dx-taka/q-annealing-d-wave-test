@@ -2,7 +2,7 @@
 # 開発ネットワークでの連続実行では下記。
 flag_data_list = [True, False, True, True, True]
 # nastranがない場合のデバッグ時は下記
-flag_data_list = [True, True, True, False, True]
+# flag_data_list = [True, False, True, False, True]
 
 import logging
 # LOG_LEVELS = {
@@ -15,7 +15,7 @@ import logging
 # }
 log_level = logging.DEBUG
 
-from amplify import BinaryQuadraticModel, Solver, decode_solution, VariableGenerator, solve
+from amplify import decode_solution, VariableGenerator, solve
 from amplify.client import FixstarsClient
 from collections import defaultdict
 import csv
@@ -144,10 +144,17 @@ class OptimizeManager:
     def set_to_solid(self):
         self._is_solid = True
 
-    def set_cost_lambda(self, lambda_val):
+    def set_cost_lambda(self, lambda_val, txtpath):
         self._cost_lambda = lambda_val
+        with open(txtpath, "w") as file:
+            file.write(str(lambda_val))
 
-    def get_cost_lambda(self):
+    def get_cost_lambda(self, txtpath):
+        if self._cost_lambda < 0:
+            if os.path.exists(txtpath):
+                with open(txtpath, "r") as file:
+                    value = file.read().strip()
+                    self._cost_lambda = float(value)
         return self._cost_lambda
 
     def restore_shared_edges_dict(self, edge_dict, csvpath):
@@ -1179,14 +1186,12 @@ def do_vqe_single_optimize(h, J, S_minus_1, S_plus_1, max_iter):
         vqe_ansatz(params)
         return [qml.expval(qml.PauliZ(i)) for i in range(num_qubits)]
     
-    init_params = np.random.uniform(0, np.pi, num_qubits)
-
     # optimizer = NesterovMomentumOptimizer(stepsize=0.1)
     optimizer = AdamOptimizer(stepsize=0.001)
     # optimizer = SPSAOptimizer(maxiter=100)
 
     # VQEの実行
-    params = init_params
+    params = np.array(np.random.uniform(0, np.pi, num_qubits))
     log_span = int(max_iter / 1000)
     for i in range(max_iter):
         params = optimizer.step(cost, params)
@@ -1610,7 +1615,7 @@ def main2(phase_num):
         base_name, _ = os.path.splitext(dat_file_path)
         reserve_data_csv = base_name + '_reserve_data_for_single_opt.csv'
         new_row = ['First_sum_volume', sum_volume_pre]
-        om.update_thickness_youngsmodulus_csv(reserve_data_csv, 2, new_row)
+        om.update_thickness_youngsmodulus_csv(reserve_data_csv, 1, new_row)
 
     logging.debug(f"{phase_num}回目の最適化前の、密度を考慮した体積の合計値：{sum_volume_pre}")
     
@@ -1672,7 +1677,9 @@ def main2(phase_num):
     J = {}
     cost_lambda_calc = cost_lambda
     cost_lambda_calc_multiply = (1 + 5 ** 0.5) / 2  # 黄金比
-    old_cost_lambda =  om.get_cost_lambda()
+    base_name, _ = os.path.splitext(sys.argv[1])
+    lambda_reserve_txt = base_name + '_for_restore_lambda.txt'
+    old_cost_lambda =  om.get_cost_lambda(lambda_reserve_txt)
     if old_cost_lambda > 0:
         cost_lambda_calc = (old_cost_lambda / cost_lambda_calc_multiply)
     for index, elem in enumerate(merged_elem_list):
@@ -1743,7 +1750,7 @@ def main2(phase_num):
                 b_do_single_optimize = False
                 b_omit_calculate_cost_lambda_each_time = True
                 if b_omit_calculate_cost_lambda_each_time:
-                    om.set_cost_lambda(cost_lambda_calc)
+                    om.set_cost_lambda(cost_lambda_calc, lambda_reserve_txt)
             else:
                 cost_lambda_calc *= cost_lambda_calc_multiply
                 for key in J:
@@ -1761,7 +1768,6 @@ def main2(phase_num):
             return_val = return_value_dict[eid]
             return_val.append(ising_val)
 
-        base_name, _ = os.path.splitext(sys.argv[1])
         h_first_and_von_mises_csv = base_name + '_for_debug_return_value.csv'
         if phase_num == 1:
             rename_old_filename(h_first_and_von_mises_csv)
@@ -1771,7 +1777,6 @@ def main2(phase_num):
     om._optimize_time_dict[phase_num - 1] = elapsed_time_3
     om._optimize_elem_num_dict[phase_num - 1] = nInternalid
     om._optimize_lambda_check_num_dict[phase_num - 1] = n_optimize_num - 1
-    base_name, _ = os.path.splitext(sys.argv[1])
     time_csv = base_name + '_for_restore_time.csv'
     if phase_num == 1:
         rename_old_filename(time_csv)
@@ -1963,18 +1968,18 @@ if __name__ == '__main__':
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 4,    ### cost_lambda
-                1,   ### loop_num
+                3,   ### loop_num
                 1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
                 300,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
-                "vqe-100000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij", "amplify", "vqe-100000"
+                "sa-1000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij", "amplify", "vqe-100000"
                 1,  ### USE_CHECKER_FLAG_AVOID_FUNC
                 0.3,  ### CHECKER_COST_EFFICIENT
                 1,  ### OPENJIJ_NUM_READS
-                1,  ### OPTIMIZE_SA_PARAM
+                0,  ### OPTIMIZE_SA_PARAM
                 ""  ### AMPLIFY_TOKEN
             ]
     setup_logging(sys.argv[3])
