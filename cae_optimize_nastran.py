@@ -763,10 +763,12 @@ def calculate_checker_flag_cost_value(
     C_i_dict = {}
     J_i_dict = defaultdict(float) 
     density_dict = None
+    max_density = first_density
     if phase_num > 1:
         base_name, _ = os.path.splitext(sys.argv[1])
         density_csv = base_name + '_for_restore_density.csv'
         density_dict = get_density_dict_from_csv(density_csv, phase_num)
+        max_density = max(value for value in density_dict.values() if value <= 1 - density_increment)
     for elem_id, adjoint_elem_ids in om._shared_edge_element_dict.items():
         m_i = len(adjoint_elem_ids)
         previous_rho_i = density_dict[elem_id] if phase_num > 1 else first_density
@@ -787,6 +789,7 @@ def calculate_checker_flag_cost_value(
         sum_i = C_i_dict[idx] + J_i_dict[idx]
         cost_val = cost_efficient * sum_i / (3.0 * np.sqrt(num_elem) * std_energy)
         checker_cost_dict[idx] = cost_val
+    return max_density
 
 def calculate_ising_part(
         elem, 
@@ -1289,7 +1292,8 @@ def do_single_optimize(
         first_sum_volume,
         phase_num,
         cost_lambda_calc,
-        b_for_debug
+        b_for_debug,
+        percentage_threshold
 ):
     S_minus_1 = []
     S_plus_1 = []
@@ -1366,7 +1370,6 @@ def do_single_optimize(
     vol_diff = abs(plus_vol - minus_vol)
     diff_percentage = vol_diff * 100.0 / first_sum_volume
     logging.info(f"最適化による体積の増分：{vol_diff}、初期体積に占める変化量の割合：{diff_percentage}(%)（※ペナルティ係数：{cost_lambda_calc}）")
-    percentage_threshold = 0.1
     if diff_percentage < percentage_threshold:
         logging.info(f"最適化における初期体積に占める変化量の割合：{diff_percentage}(%)が、{percentage_threshold}(%)を下回ったため、{phase_num}回目の最適化を完了します。")
         print(f"最適化における初期体積に占める変化量の割合：{diff_percentage}(%)が、{percentage_threshold}(%)を下回ったため、{phase_num}回目の最適化を完了します。")
@@ -1630,7 +1633,7 @@ def main2(phase_num):
     checker_cost_dict = {}
     b_use_checker_flag_avoid_func = False if str(sys.argv[17]) == "0" else True
     cost_efficient = float(sys.argv[18])
-    calculate_checker_flag_cost_value(
+    max_density_in_all_elem = calculate_checker_flag_cost_value(
         checker_cost_dict,
         target_thickness_density_percentage,
         phase_num,
@@ -1676,12 +1679,23 @@ def main2(phase_num):
     h = {}
     J = {}
     cost_lambda_calc = cost_lambda
-    cost_lambda_calc_multiply = (1 + 5 ** 0.5) / 2  # 黄金比
+    cost_lambda_calc_multiply = float(sys.argv[24])
+    if cost_lambda_calc_multiply < 0:
+        cost_lambda_calc_multiply = (1 + 5 ** 0.5) / 2  # 黄金比
     base_name, _ = os.path.splitext(sys.argv[1])
     lambda_reserve_txt = base_name + '_for_restore_lambda.txt'
     old_cost_lambda =  om.get_cost_lambda(lambda_reserve_txt)
     if old_cost_lambda > 0:
         cost_lambda_calc = (old_cost_lambda / cost_lambda_calc_multiply)
+    b_activate_checker = False
+    checker_start_density = float(sys.argv[25])
+    checker_forcely_start_phase = int(sys.argv[26])
+    if b_use_checker_flag_avoid_func and (max_density_in_all_elem >= checker_start_density):
+        b_activate_checker = True
+    if b_use_checker_flag_avoid_func and (phase_num >= checker_forcely_start_phase):
+        b_activate_checker = True
+    if b_activate_checker:
+        logging.info("チェッカーフラグ構造を回避するための処理を加えます")
     for index, elem in enumerate(merged_elem_list):
         eid = int(elem.get('eid', 0))
         ising_index_eid_map[eid] = index
@@ -1692,7 +1706,7 @@ def main2(phase_num):
         h_first = (k_0 * return_val[2]) / (3.0 * np.sqrt(nInternalid) * std_of_energy_list)
         # h_first = (k_0 * return_val[2]) / (2.0 * np.sqrt(nInternalid) * std_of_energy_list)
         h[index] = h_first
-        if b_use_checker_flag_avoid_func:
+        if b_activate_checker:
             checker_cost = checker_cost_dict[eid]
             h[index] -= checker_cost
         return_val.append(h_first)
@@ -1722,16 +1736,18 @@ def main2(phase_num):
     b_for_debug = om.get_from_flag_data_list(4)
     b_do_optimize = om.get_from_flag_data_list(0)
     inverse_ising_index_eid_map = {value: key for key, value in ising_index_eid_map.items()}
+    s_optimize_rule = sys.argv[16]
+    percentage_threshold = float(sys.argv[22])
+    max_lambda_search_num = int(sys.argv[23])
     n_optimize_num = 1
     if b_do_optimize and not b_fin_optimize:
         b_do_single_optimize = True
         while b_do_single_optimize:
-            if n_optimize_num >= 5:
-                print("試行回数が5回を超えたため、最適化を進めます。")
+            if n_optimize_num >= max_lambda_search_num:
+                print(f"試行回数が{max_lambda_search_num}回を超えたため、最適化を進めます。")
                 break
             print(f"ペナルティ係数：{cost_lambda_calc}での最適化を開始します。フェーズ数：{phase_num}、試行回数：{n_optimize_num}回目")
             n_optimize_num += 1
-            s_optimize_rule = sys.argv[16]
             b_fin_single_optimize = do_single_optimize(
                 s_optimize_rule,
                 h,
@@ -1744,7 +1760,8 @@ def main2(phase_num):
                 om._sum_target_volume,
                 phase_num,
                 cost_lambda_calc,
-                b_for_debug
+                b_for_debug,
+                percentage_threshold
             )
             if b_fin_single_optimize:
                 b_do_single_optimize = False
@@ -1968,19 +1985,24 @@ if __name__ == '__main__':
                 0.1,  ### density_increment
                 2.0,  ### density_power
                 4,    ### cost_lambda
-                3,   ### loop_num
+                6,   ### loop_num
                 1,    ### start_phase_num
                 0.1,  ### decide_val_threshold
                 0.001,  ### threshold
                 0,    ### finish_elem_num
                 300,  ### upper_limit_of_stress
                 0,  ### use_thickness_flag
-                "sa-1000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij", "amplify", "vqe-100000"
+                "openJij-sa-1000",  ### "d-wave", "qiskit", "sa-{num of loop}"(ex. "sa-1000000"), "openJij", "amplify", "vqe-100000"
                 1,  ### USE_CHECKER_FLAG_AVOID_FUNC
                 0.3,  ### CHECKER_COST_EFFICIENT
                 1,  ### OPENJIJ_NUM_READS
                 0,  ### OPTIMIZE_SA_PARAM
-                ""  ### AMPLIFY_TOKEN
+                "",  ### AMPLIFY_TOKEN
+                0.04, ### VOLUME_PERCENTAGE_THRESHOLD
+                10,   ### MAX_LAMBDA_SEARCH_NUM
+                3,  ### COST_LAMBDA_MULTYPLY
+                0.75, ### CHECKER_START_DENSITY
+                10 ### CHECKER_FORCELY_START_PHASE
             ]
     setup_logging(sys.argv[3])
     logging.info("\n\n")
