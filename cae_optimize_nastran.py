@@ -1745,6 +1745,7 @@ def main2(phase_num):
         while b_do_single_optimize:
             if n_optimize_num >= max_lambda_search_num:
                 print(f"試行回数が{max_lambda_search_num}回を超えたため、最適化を進めます。")
+                om.set_cost_lambda(cost_lambda_calc, lambda_reserve_txt)
                 break
             print(f"ペナルティ係数：{cost_lambda_calc}での最適化を開始します。フェーズ数：{phase_num}、試行回数：{n_optimize_num}回目")
             n_optimize_num += 1
@@ -1765,9 +1766,7 @@ def main2(phase_num):
             )
             if b_fin_single_optimize:
                 b_do_single_optimize = False
-                b_omit_calculate_cost_lambda_each_time = True
-                if b_omit_calculate_cost_lambda_each_time:
-                    om.set_cost_lambda(cost_lambda_calc, lambda_reserve_txt)
+                om.set_cost_lambda(cost_lambda_calc, lambda_reserve_txt)
             else:
                 cost_lambda_calc *= cost_lambda_calc_multiply
                 for key in J:
